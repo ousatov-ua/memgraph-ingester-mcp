@@ -23,6 +23,7 @@ Code graph tools:
 Memory tools:
 
 - `memory_orientation`: rules plus open findings, tasks, questions, and risks.
+- `memory_schema`: allowed memory types, upsert fields, controlled values, and CodeRef targets.
 - `memory_search`: MemoryChunk vector search with index-only hit metadata.
 - `memory_get`: canonical memory node plus resolved CodeRefs.
 - `memory_upsert`: create/update Decision, ADR, Rule, Context, Finding, Task, Risk, Question, or Idea.

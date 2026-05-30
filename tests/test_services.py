@@ -77,6 +77,43 @@ def make_tools():
     return MemgraphIngesterTools(FakeClient(), MemgraphConfig(default_project="demo"))
 
 
+def test_memory_schema_lists_fields_controlled_values_and_targets():
+    tools = make_tools()
+
+    result = tools.memory_schema()
+
+    context = result["memoryTypes"]["Context"]
+    task = result["memoryTypes"]["Task"]
+    assert context["fields"] == ["content", "source", "title", "topic"]
+    assert context["controlledValues"] == {}
+    assert task["controlledValues"]["status"] == [
+        "blocked",
+        "cancelled",
+        "doing",
+        "done",
+        "todo",
+    ]
+    assert task["controlledValues"]["priority"] == ["0", "1", "2", "3", "4"]
+    assert "File" in result["targetTypes"]
+    assert tools.client.calls == []
+
+
+def test_memory_schema_can_be_scoped_to_one_memory_type():
+    tools = make_tools()
+
+    result = tools.memory_schema("Context")
+
+    assert list(result["memoryTypes"]) == ["Context"]
+    assert result["memoryTypes"]["Context"]["fields"] == ["content", "source", "title", "topic"]
+
+
+def test_memory_schema_rejects_unknown_memory_type():
+    tools = make_tools()
+
+    with pytest.raises(MemgraphError, match="Unsupported memory_type"):
+        tools.memory_schema("Note")
+
+
 def test_memory_upsert_validates_fields_and_normalizes_priority():
     tools = make_tools()
 

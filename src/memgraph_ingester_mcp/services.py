@@ -58,6 +58,20 @@ def _memory_spec(memory_type: str):
     return spec
 
 
+def _memory_schema_entry(memory_type: str) -> dict[str, Any]:
+    spec = _memory_spec(memory_type)
+    return {
+        "label": spec.label,
+        "relation": spec.relation,
+        "fields": sorted(spec.fields),
+        "controlledValues": {
+            field: sorted(values)
+            for (type_name, field), values in sorted(CONTROLLED_VALUES.items())
+            if type_name == memory_type
+        },
+    }
+
+
 def _validate_target_type(target_type: str) -> None:
     if target_type not in TARGET_TYPES:
         allowed = ", ".join(sorted(TARGET_TYPES))
@@ -509,6 +523,14 @@ class MemgraphIngesterTools:
                 """,
                 {"project": project_name},
             ),
+        }
+
+    def memory_schema(self, memory_type: str | None = None) -> dict[str, Any]:
+        memory_types = [memory_type] if memory_type is not None else sorted(MEMORY_SPECS)
+        schemas = {type_name: _memory_schema_entry(type_name) for type_name in memory_types}
+        return {
+            "memoryTypes": schemas,
+            "targetTypes": sorted(TARGET_TYPES),
         }
 
     def memory_search(

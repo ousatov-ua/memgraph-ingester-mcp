@@ -97,6 +97,12 @@ def create_server(
         return tools.memory_orientation(project)
 
     @mcp.tool()
+    def memory_schema(memory_type: str | None = None) -> dict[str, Any]:
+        """Return allowed memory types, fields, controlled values, and CodeRef targets."""
+
+        return tools.memory_schema(memory_type)
+
+    @mcp.tool()
     def memory_search(query: str, project: str | None = None, limit: int = 5) -> dict[str, Any]:
         """Search MemoryChunk embeddings and return index-only memory hits."""
 
