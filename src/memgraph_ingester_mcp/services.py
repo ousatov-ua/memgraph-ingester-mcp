@@ -285,7 +285,7 @@ class MemgraphIngesterTools:
                    t.visibility AS visibility, t.isExternal AS isExternal,
                    t.language AS language, t.framework AS framework,
                    t.modulePath AS modulePath, collect(DISTINCT file.path) AS files
-            ORDER BY t.fqn
+            ORDER BY fqn
             LIMIT $limit
             """,
             {
@@ -343,7 +343,7 @@ class MemgraphIngesterTools:
                    method.startLine AS startLine, method.endLine AS endLine,
                    method.isStatic AS isStatic, method.isSynthetic AS isSynthetic,
                    collect(DISTINCT file.path) AS files
-            ORDER BY method.signature
+            ORDER BY signature
             SKIP $skip
             LIMIT $limit
             """,
@@ -596,6 +596,7 @@ class MemgraphIngesterTools:
                 code_ref.get("target_type") or code_ref.get("targetType") or "",
                 code_ref.get("key") or "",
                 project_name,
+                refresh_chunk=False,
             )
         chunk_result = None
         if refresh_chunk:
@@ -656,6 +657,9 @@ class MemgraphIngesterTools:
         target_type: str,
         key: str,
         project: str | None = None,
+        *,
+        refresh_chunk: bool = True,
+        embed: bool = True,
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         spec = _memory_spec(memory_type)
@@ -679,7 +683,20 @@ class MemgraphIngesterTools:
             },
             write=True,
         )
-        return {"project": project_name, "resolved": bool(rows), "links": rows}
+        chunk_result = None
+        if rows and refresh_chunk:
+            chunk_result = self.memory_refresh_chunk(
+                memory_type,
+                memory_id,
+                project_name,
+                embed=embed,
+            )
+        return {
+            "project": project_name,
+            "resolved": bool(rows),
+            "links": rows,
+            "chunk": chunk_result,
+        }
 
     def memory_refresh_chunk(
         self,
@@ -726,6 +743,8 @@ class MemgraphIngesterTools:
         embedding_result = None
         if embed:
             embedding_result = self.memory_refresh_embeddings([chunk_id], project_name)
+            if rows and chunk_id in set(embedding_result.get("embedded", [])):
+                rows[0]["dirty"] = False
         return {
             "project": project_name,
             "chunk": rows[0] if rows else None,

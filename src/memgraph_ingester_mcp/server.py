@@ -157,10 +157,20 @@ def create_server(
         target_type: str,
         key: str,
         project: str | None = None,
+        refresh_chunk: bool = True,
+        embed: bool = True,
     ) -> dict[str, Any]:
         """Resolve and link a Memory node to a CodeRef target."""
 
-        return tools.memory_link_code_ref(memory_type, memory_id, target_type, key, project)
+        return tools.memory_link_code_ref(
+            memory_type,
+            memory_id,
+            target_type,
+            key,
+            project,
+            refresh_chunk=refresh_chunk,
+            embed=embed,
+        )
 
     @mcp.tool()
     def memory_refresh_chunk(
