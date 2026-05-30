@@ -72,6 +72,10 @@ def _memory_schema_entry(memory_type: str) -> dict[str, Any]:
     }
 
 
+def _memory_label_predicate(variable: str = "memory") -> str:
+    return " OR ".join(f"{variable}:{spec.label}" for spec in MEMORY_SPECS.values())
+
+
 def _validate_target_type(target_type: str) -> None:
     if target_type not in TARGET_TYPES:
         allowed = ", ".join(sorted(TARGET_TYPES))
@@ -565,17 +569,16 @@ class MemgraphIngesterTools:
     def memory_get(self, memory_id: str, project: str | None = None) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         rows = self.client.run(
-            """
-            MATCH (memory {project: $project, id: $memory_id})
-            WHERE memory:Decision OR memory:ADR OR memory:Rule OR memory:Context
-               OR memory:Finding OR memory:Task OR memory:Risk OR memory:Question OR memory:Idea
+            f"""
+            MATCH (memory {{project: $project, id: $memory_id}})
+            WHERE {_memory_label_predicate("memory")}
             OPTIONAL MATCH (memory)-[:REFERS_TO]->(ref:CodeRef)-[:RESOLVES_TO]->(target)
             WITH memory, collect(
-                CASE WHEN ref IS NULL THEN NULL ELSE {
+                CASE WHEN ref IS NULL THEN NULL ELSE {{
                     targetType: ref.targetType,
                     key: ref.key,
                     targetLabels: labels(target)
-                } END
+                }} END
             ) AS refs
             RETURN labels(memory) AS labels, properties(memory) AS properties,
                    [ref IN refs WHERE ref IS NOT NULL] AS codeRefs
@@ -583,6 +586,77 @@ class MemgraphIngesterTools:
             {"project": project_name, "memory_id": memory_id},
         )
         return {"project": project_name, "memory": rows[0] if rows else None}
+
+    def delete_memory(self, memory_id: str, project: str | None = None) -> dict[str, Any]:
+        project_name = self.resolve_project(project)
+        rows = self.client.run(
+            f"""
+            MATCH (memory {{project: $project, id: $memory_id}})
+            WHERE {_memory_label_predicate("memory")}
+            OPTIONAL MATCH (memory)-[:HAS_RAG_CHUNK]->(chunk:MemoryChunk {{project: $project}})
+            OPTIONAL MATCH (memory)-[:REFERS_TO]->(ref:CodeRef {{project: $project}})
+            RETURN labels(memory) AS labels, properties(memory) AS properties,
+                   [id IN collect(DISTINCT chunk.id) WHERE id IS NOT NULL] AS chunkIds,
+                   [codeRef IN collect(DISTINCT CASE WHEN ref IS NULL THEN NULL ELSE {{
+                       targetType: ref.targetType,
+                       key: ref.key
+                   }} END) WHERE codeRef IS NOT NULL] AS codeRefs
+            """,
+            {"project": project_name, "memory_id": memory_id},
+        )
+        if not rows:
+            return {
+                "project": project_name,
+                "deleted": False,
+                "memory": None,
+                "chunkIds": [],
+                "orphanCodeRefsDeleted": 0,
+            }
+
+        memory = rows[0]
+        code_refs = memory.get("codeRefs", [])
+        self.client.run(
+            f"""
+            MATCH (memory {{project: $project, id: $memory_id}})
+            WHERE {_memory_label_predicate("memory")}
+            OPTIONAL MATCH (memory)-[:HAS_RAG_CHUNK]->(chunk:MemoryChunk {{project: $project}})
+            WITH memory, [chunk IN collect(DISTINCT chunk) WHERE chunk IS NOT NULL] AS chunks
+            FOREACH (chunk IN chunks | DETACH DELETE chunk)
+            DETACH DELETE memory
+            RETURN true AS deleted
+            """,
+            {"project": project_name, "memory_id": memory_id},
+            write=True,
+        )
+
+        orphan_deleted = 0
+        if code_refs:
+            orphan_rows = self.client.run(
+                """
+                MATCH (ref:CodeRef {project: $project})
+                WHERE any(codeRef IN $code_refs
+                          WHERE codeRef.targetType = ref.targetType AND codeRef.key = ref.key)
+                  AND NOT (()-[:REFERS_TO]->(ref))
+                WITH collect(ref) AS refs
+                FOREACH (ref IN refs | DETACH DELETE ref)
+                RETURN size(refs) AS deleted
+                """,
+                {"project": project_name, "code_refs": code_refs},
+                write=True,
+            )
+            orphan_deleted = orphan_rows[0].get("deleted", 0) if orphan_rows else 0
+
+        return {
+            "project": project_name,
+            "deleted": True,
+            "memory": {
+                "labels": memory.get("labels", []),
+                "properties": memory.get("properties", {}),
+            },
+            "chunkIds": memory.get("chunkIds", []),
+            "codeRefs": code_refs,
+            "orphanCodeRefsDeleted": orphan_deleted,
+        }
 
     def memory_upsert(
         self,

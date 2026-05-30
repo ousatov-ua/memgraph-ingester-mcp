@@ -115,6 +115,12 @@ def create_server(
         return tools.memory_get(memory_id, project)
 
     @mcp.tool()
+    def delete_memory(memory_id: str, project: str | None = None) -> dict[str, Any]:
+        """Delete one Memory node plus its derived chunk and orphan CodeRefs."""
+
+        return tools.delete_memory(memory_id, project)
+
+    @mcp.tool()
     def memory_upsert(
         memory_type: str,
         memory_id: str,

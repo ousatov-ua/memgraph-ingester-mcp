@@ -13,6 +13,26 @@ class FakeClient:
         params = dict(parameters or {})
         self.calls.append({"query": query, "parameters": params, "write": write})
 
+        if "AS chunkIds" in query:
+            if params["memory_id"] == "MISSING":
+                return []
+            return [
+                {
+                    "labels": ["Task"],
+                    "properties": {"id": params["memory_id"], "title": "Implement MCP"},
+                    "chunkIds": [f"MCH-{params['memory_id']}"],
+                    "codeRefs": [
+                        {
+                            "targetType": "File",
+                            "key": "src/memgraph_ingester_mcp/server.py",
+                        }
+                    ],
+                }
+            ]
+
+        if "RETURN size(refs) AS deleted" in query:
+            return [{"deleted": 1}]
+
         if "RETURN labels(memory) AS labels" in query:
             return [
                 {
@@ -199,6 +219,31 @@ def test_memory_refresh_chunk_reports_clean_after_embedding():
 
     assert result["chunk"]["dirty"] is False
     assert result["embedding"]["embedded"] == ["MCH-TASK-demo"]
+
+
+def test_delete_memory_removes_memory_chunk_and_orphan_code_refs():
+    tools = make_tools()
+
+    result = tools.delete_memory("TASK-demo")
+
+    assert result["deleted"] is True
+    assert result["chunkIds"] == ["MCH-TASK-demo"]
+    assert result["orphanCodeRefsDeleted"] == 1
+    delete_calls = [call for call in tools.client.calls if call["write"] is True]
+    assert len(delete_calls) == 2
+    assert "DETACH DELETE memory" in delete_calls[0]["query"]
+    assert "DETACH DELETE chunk" in delete_calls[0]["query"]
+    assert "DETACH DELETE ref" in delete_calls[1]["query"]
+
+
+def test_delete_memory_reports_missing_without_writes():
+    tools = make_tools()
+
+    result = tools.delete_memory("MISSING")
+
+    assert result["deleted"] is False
+    assert result["memory"] is None
+    assert all(call["write"] is False for call in tools.client.calls)
 
 
 def test_raw_read_cypher_rejects_writes():

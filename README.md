@@ -28,6 +28,7 @@ Memory tools:
 - `memory_get`: canonical memory node plus resolved CodeRefs.
 - `memory_upsert`: create/update Decision, ADR, Rule, Context, Finding, Task, Risk, Question, or Idea.
 - `memory_update_status`: lifecycle status update.
+- `delete_memory`: delete one memory node plus its derived chunk and orphan CodeRefs.
 - `memory_link_code_ref`: link memory to a resolved CodeRef target.
 - `memory_refresh_chunk`, `memory_refresh_embeddings`: maintain derived memory RAG data.
 
