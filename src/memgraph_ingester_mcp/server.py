@@ -28,28 +28,49 @@ def create_server(
         return tools.server_status(project)
 
     @mcp.tool()
-    def code_orientation(project: str | None = None, limit: int = 30) -> dict[str, Any]:
+    def code_orientation(
+        project: str | None = None,
+        limit: int = 30,
+        sections: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Return a compact code graph orientation for an indexed project."""
 
-        return tools.code_orientation(project, limit)
+        return tools.code_orientation(project, limit, sections)
 
     @mcp.tool()
-    def code_search(query: str, project: str | None = None, limit: int = 10) -> dict[str, Any]:
+    def code_search(
+        query: str,
+        project: str | None = None,
+        limit: int = 10,
+        include_text: bool = False,
+        text_limit: int = 160,
+        dedupe_by_source: bool = True,
+    ) -> dict[str, Any]:
         """Search CodeChunk embeddings and return source-linked discovery hits."""
 
-        return tools.code_search(query, project, limit)
+        return tools.code_search(query, project, limit, include_text, text_limit, dedupe_by_source)
 
     @mcp.tool()
     def code_lookup_type(
         project: str | None = None,
         type_name: str | None = None,
         fqn: str | None = None,
-        include_members: bool = True,
+        include_members: bool = False,
+        member_limit: int = 50,
+        member_summary: bool = True,
         limit: int = 20,
     ) -> dict[str, Any]:
         """Look up classes, interfaces, or annotations by simple name or FQN."""
 
-        return tools.code_lookup_type(project, type_name, fqn, include_members, limit)
+        return tools.code_lookup_type(
+            project,
+            type_name,
+            fqn,
+            include_members,
+            member_limit,
+            member_summary,
+            limit,
+        )
 
     @mcp.tool()
     def code_lookup_methods(
@@ -67,22 +88,45 @@ def create_server(
         callee_fragment: str,
         project: str | None = None,
         skip: int = 0,
-        limit: int = 100,
+        limit: int = 25,
+        compact: bool = True,
     ) -> dict[str, Any]:
         """List methods that call matching callee signatures."""
 
-        return tools.code_callers(callee_fragment, project, skip, limit)
+        return tools.code_callers(callee_fragment, project, skip, limit, compact)
 
     @mcp.tool()
     def code_callees(
         caller_fragment: str,
         project: str | None = None,
         skip: int = 0,
-        limit: int = 100,
+        limit: int = 25,
+        compact: bool = True,
     ) -> dict[str, Any]:
         """List callees invoked by matching caller signatures."""
 
-        return tools.code_callees(caller_fragment, project, skip, limit)
+        return tools.code_callees(caller_fragment, project, skip, limit, compact)
+
+    @mcp.tool()
+    def code_hot_paths(
+        project: str | None = None,
+        limit: int = 20,
+        include_tests: bool = False,
+        include_evidence: bool = True,
+    ) -> dict[str, Any]:
+        """Return compact hot-path candidates from type size, method size, fan-in, and fan-out."""
+
+        return tools.code_hot_paths(project, limit, include_tests, include_evidence)
+
+    @mcp.tool()
+    def code_quality_stats(
+        project: str | None = None,
+        include_tests: bool = True,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Return compact graph-wide code quality and quantity metrics."""
+
+        return tools.code_quality_stats(project, include_tests, limit)
 
     @mcp.tool()
     def code_hierarchy(fqn: str, project: str | None = None) -> dict[str, Any]:

@@ -13,11 +13,13 @@ The package is intended to be published to PyPI as `memgraph-ingester-mcp` under
 Code graph tools:
 
 - `server_status`: graph inventory, memory counts, and vector index status.
-- `code_orientation`: compact package/type/call overview.
-- `code_search`: CodeChunk vector search for broad discovery.
-- `code_lookup_type`: exact class/interface/annotation lookup with members.
+- `code_orientation`: compact package/type/call overview; pass `sections` to keep it focused.
+- `code_quality_stats`: graph-wide code quality and quantity metrics.
+- `code_hot_paths`: compact hot-path candidates from size and call graph metrics.
+- `code_search`: CodeChunk vector search for broad discovery; text is omitted by default.
+- `code_lookup_type`: exact class/interface/annotation lookup; member expansion is opt-in.
 - `code_lookup_methods`: exact method lookup with source ranges.
-- `code_callers`, `code_callees`: call graph lookups.
+- `code_callers`, `code_callees`: compact, paginated call graph lookups.
 - `code_hierarchy`: class ancestry, children, interfaces, and interface implementors.
 
 Memory tools:
@@ -161,5 +163,7 @@ Add this to Gemini CLI `settings.json`:
 ## Agent Guidance
 
 Prefer the dedicated tools over `raw_read_cypher`. Use RAG search tools only for broad discovery,
-then follow up with exact lookup tools before making claims or edits. Use memory write tools for
-task lifecycle changes and CodeRef links so derived MemoryChunks stay refreshable.
+then follow up with exact lookup tools before making claims or edits. Keep responses compact:
+prefer `code_quality_stats`, `code_hot_paths`, `code_orientation(sections=[...])`, compact
+callers/callees, and `code_lookup_type(include_members=false)`. Use memory write tools for task
+lifecycle changes and CodeRef links so derived MemoryChunks stay refreshable.

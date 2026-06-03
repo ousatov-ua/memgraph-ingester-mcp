@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
+from json import dumps
 from typing import Any
 
 from memgraph_ingester_mcp.config import MemgraphConfig
@@ -48,6 +49,61 @@ def _compact_text(value: str | None, limit: int = 600) -> str | None:
     if value is None or len(value) <= limit:
         return value
     return f"{value[:limit].rstrip()}..."
+
+
+def _bounded_text_limit(limit: int) -> int:
+    if limit <= 0:
+        return 0
+    return min(limit, 2_000)
+
+
+def _json_size(value: Mapping[str, Any]) -> int:
+    return len(dumps(value, default=str, separators=(",", ":"), sort_keys=True))
+
+
+def _with_result_meta(
+    response: dict[str, Any],
+    rows: Sequence[Any],
+    *,
+    skip: int = 0,
+    limit: int | None = None,
+    total_count: int | None = None,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    returned_count = len(rows)
+    total = returned_count if total_count is None else total_count
+    next_skip = skip + returned_count
+    meta: dict[str, Any] = {
+        "totalCount": total,
+        "returnedCount": returned_count,
+        "skip": skip,
+        "limit": limit,
+        "hasMore": next_skip < total,
+        "nextSkip": next_skip if next_skip < total else None,
+    }
+    if extra:
+        meta.update(extra)
+    response["meta"] = meta
+    meta["resultChars"] = _json_size(response)
+    return response
+
+
+def _normalize_sections(
+    sections: Sequence[str] | str | None,
+    *,
+    allowed: frozenset[str],
+    default: frozenset[str],
+) -> frozenset[str]:
+    if sections is None:
+        return default
+    raw = sections.split(",") if isinstance(sections, str) else list(sections)
+    requested = frozenset(section.strip() for section in raw if section and section.strip())
+    unknown = sorted(requested - allowed)
+    if unknown:
+        raise MemgraphError(
+            f"Unknown section(s): {', '.join(unknown)}. Allowed: {', '.join(sorted(allowed))}."
+        )
+    return requested or default
 
 
 def _memory_spec(memory_type: str):
@@ -196,73 +252,102 @@ class MemgraphIngesterTools:
             "vectorIndexes": indexes,
         }
 
-    def code_orientation(self, project: str | None = None, limit: int = 30) -> dict[str, Any]:
+    def code_orientation(
+        self,
+        project: str | None = None,
+        limit: int = 30,
+        sections: Sequence[str] | str | None = None,
+    ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         bounded_limit = _bounded_limit(limit, default=30, maximum=100)
-        languages = self.client.run(
-            """
-            MATCH (l:Language {project: $project})-[:CONTAINS]->(c:Code)
-            RETURN l.name AS languageName, l.graphName AS graphName, c.language AS language,
-                   c.lastIngested AS lastIngested
-            ORDER BY languageName
-            """,
-            {"project": project_name},
+        allowed_sections = frozenset({"languages", "packages", "largestTypes", "crossOwnerCalls"})
+        requested = _normalize_sections(
+            sections,
+            allowed=allowed_sections,
+            default=allowed_sections,
         )
-        packages = self.client.run(
-            """
-            MATCH (p:Package {project: $project})
-            OPTIONAL MATCH (p)-[:CONTAINS]->(c:Class {project: $project})
-            WITH p, count(DISTINCT c) AS classes
-            RETURN p.language AS language, p.name AS package, classes
-            ORDER BY language, package
-            LIMIT $limit
-            """,
-            {"project": project_name, "limit": bounded_limit},
-        )
-        large_types = self.client.run(
-            """
-            MATCH (t {project: $project})-[:DECLARES]->(m:Method {project: $project})
-            WHERE (t:Class OR t:Interface OR t:Annotation)
-              AND coalesce(t.isExternal, false) = false
-              AND coalesce(m.isSynthetic, false) = false
-            WITH t.fqn AS type, labels(t)[0] AS label, count(m) AS methodCount
-            RETURN type, label, methodCount
-            ORDER BY methodCount DESC, type
-            LIMIT $limit
-            """,
-            {"project": project_name, "limit": bounded_limit},
-        )
-        cross_owner_calls = self.client.run(
-            """
-            MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
-            WHERE caller.ownerFqn IS NOT NULL AND callee.ownerFqn IS NOT NULL
-              AND caller.ownerFqn <> callee.ownerFqn
-            WITH caller.ownerDisplayName + ' -> ' + callee.ownerDisplayName AS edge,
-                 COUNT(*) AS calls
-            RETURN edge, calls
-            ORDER BY calls DESC, edge
-            LIMIT $limit
-            """,
-            {"project": project_name, "limit": bounded_limit},
-        )
-        return {
-            "project": project_name,
-            "languages": languages,
-            "packages": packages,
-            "largestTypes": large_types,
-            "crossOwnerCalls": cross_owner_calls,
-        }
+        response: dict[str, Any] = {"project": project_name, "sections": sorted(requested)}
+        if "languages" in requested:
+            response["languages"] = self.client.run(
+                """
+                MATCH (l:Language {project: $project})-[:CONTAINS]->(c:Code)
+                RETURN l.name AS languageName, l.graphName AS graphName, c.language AS language,
+                       c.lastIngested AS lastIngested
+                ORDER BY languageName
+                """,
+                {"project": project_name},
+            )
+        if "packages" in requested:
+            response["packages"] = self.client.run(
+                """
+                MATCH (p:Package {project: $project})
+                OPTIONAL MATCH (p)-[:CONTAINS]->(c:Class {project: $project})
+                WITH p, count(DISTINCT c) AS classes
+                RETURN p.language AS language, p.name AS package, classes
+                ORDER BY language, package
+                LIMIT $limit
+                """,
+                {"project": project_name, "limit": bounded_limit},
+            )
+        if "largestTypes" in requested:
+            response["largestTypes"] = self.client.run(
+                """
+                MATCH (t {project: $project})-[:DECLARES]->(m:Method {project: $project})
+                WHERE (t:Class OR t:Interface OR t:Annotation)
+                  AND coalesce(t.isExternal, false) = false
+                  AND coalesce(m.isSynthetic, false) = false
+                WITH t.fqn AS type, labels(t)[0] AS label, count(m) AS methodCount
+                RETURN type, label, methodCount
+                ORDER BY methodCount DESC, type
+                LIMIT $limit
+                """,
+                {"project": project_name, "limit": bounded_limit},
+            )
+        if "crossOwnerCalls" in requested:
+            response["crossOwnerCalls"] = self.client.run(
+                """
+                MATCH (caller:Method {project: $project})
+                  -[:CALLS]->(callee:Method {project: $project})
+                WHERE caller.ownerFqn IS NOT NULL AND callee.ownerFqn IS NOT NULL
+                  AND caller.ownerFqn <> callee.ownerFqn
+                WITH caller.ownerDisplayName + ' -> ' + callee.ownerDisplayName AS edge,
+                     COUNT(*) AS calls
+                RETURN edge, calls
+                ORDER BY calls DESC, edge
+                LIMIT $limit
+                """,
+                {"project": project_name, "limit": bounded_limit},
+            )
+        response["meta"] = {"resultChars": _json_size(response)}
+        return response
 
     def code_search(
         self,
         query: str,
         project: str | None = None,
         limit: int = 10,
+        include_text: bool = False,
+        text_limit: int = 160,
+        dedupe_by_source: bool = True,
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         bounded_limit = _bounded_limit(limit, default=10, maximum=25)
-        rows = self.client.run(
+        bounded_text_limit = _bounded_text_limit(text_limit)
+        fetch_limit = min(bounded_limit * 3, 75) if dedupe_by_source else bounded_limit
+        return_projection = (
             """
+                   labels(source) AS sourceType, chunk.sourceId AS sourceId,
+                   chunk.path AS path, chunk.ownerFqn AS ownerFqn, chunk.signature AS signature,
+                   similarity, chunk.text AS text
+            """
+            if include_text
+            else """
+                   labels(source) AS sourceType, chunk.sourceId AS sourceId,
+                   chunk.path AS path, chunk.ownerFqn AS ownerFqn, chunk.signature AS signature,
+                   similarity
+            """
+        )
+        search_query = """
             CALL embeddings.text([$query], {}) YIELD embeddings
             WITH embeddings[0] AS queryVector
             CALL vector_search.search('code_chunk_embedding_v1', $limit, queryVector)
@@ -270,30 +355,67 @@ class MemgraphIngesterTools:
             WITH chunk, similarity
             WHERE chunk.project = $project
             MATCH (source {project: $project})-[:HAS_RAG_CHUNK]->(chunk)
-            RETURN labels(source) AS sourceType, chunk.sourceId AS sourceId,
-                   chunk.path AS path, chunk.ownerFqn AS ownerFqn, chunk.signature AS signature,
-                   chunk.text AS text, similarity
+            RETURN __RETURN_PROJECTION__
             ORDER BY similarity DESC
-            """,
-            {"project": project_name, "query": query, "limit": bounded_limit},
+            """.replace("__RETURN_PROJECTION__", return_projection.strip())
+        rows = self.client.run(
+            search_query,
+            {"project": project_name, "query": query, "limit": fetch_limit},
         )
+        if dedupe_by_source:
+            deduped: list[dict[str, Any]] = []
+            seen: set[tuple[str, str]] = set()
+            for row in rows:
+                source_type = ",".join(row.get("sourceType") or [])
+                key = (source_type, row.get("sourceId") or "")
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(row)
+                if len(deduped) >= bounded_limit:
+                    break
+            rows = deduped
         for row in rows:
-            row["text"] = _compact_text(row.get("text"))
-        return {"project": project_name, "query": query, "hits": rows}
+            if include_text:
+                row["text"] = _compact_text(row.get("text"), bounded_text_limit)
+            else:
+                row.pop("text", None)
+        return _with_result_meta(
+            {"project": project_name, "query": query, "hits": rows},
+            rows,
+            limit=bounded_limit,
+            extra={
+                "includeText": include_text,
+                "textLimit": bounded_text_limit,
+                "dedupeBySource": dedupe_by_source,
+            },
+        )
 
     def code_lookup_type(
         self,
         project: str | None = None,
         type_name: str | None = None,
         fqn: str | None = None,
-        include_members: bool = True,
+        include_members: bool = False,
+        member_limit: int = 50,
+        member_summary: bool = True,
         limit: int = 20,
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         if not type_name and not fqn:
             raise MemgraphError("Provide either type_name or fqn.")
         bounded_limit = _bounded_limit(limit, default=20, maximum=100)
+        bounded_member_limit = _bounded_limit(member_limit, default=50, maximum=200)
         predicate = "t.fqn = $fqn" if fqn else "t.name = $type_name"
+        count_rows = self.client.run(
+            f"""
+            MATCH (t {{project: $project}})
+            WHERE (t:Class OR t:Interface OR t:Annotation) AND {predicate}
+            RETURN count(t) AS count
+            """,
+            {"project": project_name, "type_name": type_name, "fqn": fqn},
+        )
+        total_count = count_rows[0].get("count", 0) if count_rows else 0
         types = self.client.run(
             f"""
             MATCH (t {{project: $project}})
@@ -313,8 +435,24 @@ class MemgraphIngesterTools:
                 "limit": bounded_limit,
             },
         )
-        if include_members:
+        if member_summary or include_members:
             for item in types:
+                item_fqn = item.get("fqn")
+                if member_summary and item_fqn:
+                    summary = self.client.run(
+                        """
+                        MATCH (t {project: $project, fqn: $fqn})
+                        WHERE t:Class OR t:Interface OR t:Annotation
+                        OPTIONAL MATCH (t)-[:DECLARES]->(m:Method {project: $project})
+                        WITH t, count(DISTINCT m) AS methods
+                        OPTIONAL MATCH (t)-[:DECLARES]->(field:Field {project: $project})
+                        RETURN methods AS methods, count(DISTINCT field) AS fields
+                        """,
+                        {"project": project_name, "fqn": item_fqn},
+                    )
+                    item["memberCounts"] = summary[0] if summary else {"methods": 0, "fields": 0}
+                if not include_members or not item_fqn:
+                    continue
                 item["methods"] = self.client.run(
                     """
                     MATCH (t {project: $project, fqn: $fqn})-[:DECLARES]->(m:Method)
@@ -326,7 +464,7 @@ class MemgraphIngesterTools:
                     ORDER BY m.name, m.signature
                     LIMIT $limit
                     """,
-                    {"project": project_name, "fqn": item["fqn"], "limit": 200},
+                    {"project": project_name, "fqn": item_fqn, "limit": bounded_member_limit},
                 )
                 item["fields"] = self.client.run(
                     """
@@ -338,9 +476,19 @@ class MemgraphIngesterTools:
                     ORDER BY field.name
                     LIMIT $limit
                     """,
-                    {"project": project_name, "fqn": item["fqn"], "limit": 200},
+                    {"project": project_name, "fqn": item_fqn, "limit": bounded_member_limit},
                 )
-        return {"project": project_name, "types": types}
+        return _with_result_meta(
+            {"project": project_name, "types": types},
+            types,
+            limit=bounded_limit,
+            total_count=total_count,
+            extra={
+                "includeMembers": include_members,
+                "memberLimit": bounded_member_limit if include_members else None,
+                "memberSummary": member_summary,
+            },
+        )
 
     def code_lookup_methods(
         self,
@@ -372,16 +520,36 @@ class MemgraphIngesterTools:
                 "limit": _bounded_limit(limit, default=50, maximum=200),
             },
         )
-        return {"project": project_name, "methods": rows}
+        count_rows = self.client.run(
+            """
+            MATCH (method:Method {project: $project})
+            WHERE method.signature CONTAINS $fragment
+            RETURN count(method) AS count
+            """,
+            {"project": project_name, "fragment": signature_fragment},
+        )
+        total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
+        skip_value = _bounded_skip(skip)
+        limit_value = _bounded_limit(limit, default=50, maximum=200)
+        return _with_result_meta(
+            {"project": project_name, "methods": rows},
+            rows,
+            skip=skip_value,
+            limit=limit_value,
+            total_count=total_count,
+        )
 
     def code_callers(
         self,
         callee_fragment: str,
         project: str | None = None,
         skip: int = 0,
-        limit: int = 100,
+        limit: int = 25,
+        compact: bool = True,
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
+        skip_value = _bounded_skip(skip)
+        limit_value = _bounded_limit(limit, default=25, maximum=100)
         rows = self.client.run(
             """
             MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
@@ -399,20 +567,50 @@ class MemgraphIngesterTools:
             {
                 "project": project_name,
                 "fragment": callee_fragment,
-                "skip": _bounded_skip(skip),
-                "limit": _bounded_limit(limit, default=100, maximum=300),
+                "skip": skip_value,
+                "limit": limit_value,
             },
         )
-        return {"project": project_name, "callers": rows}
+        count_rows = self.client.run(
+            """
+            MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
+            WHERE callee.signature CONTAINS $fragment
+            RETURN count(*) AS count
+            """,
+            {"project": project_name, "fragment": callee_fragment},
+        )
+        total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
+        if compact:
+            rows = [
+                {
+                    "caller": row.get("callerSignature"),
+                    "owner": row.get("callerOwner"),
+                    "startLine": row.get("callerStartLine"),
+                    "endLine": row.get("callerEndLine"),
+                    "calleeOwner": row.get("calleeOwner"),
+                }
+                for row in rows
+            ]
+        return _with_result_meta(
+            {"project": project_name, "callers": rows},
+            rows,
+            skip=skip_value,
+            limit=limit_value,
+            total_count=total_count,
+            extra={"compact": compact},
+        )
 
     def code_callees(
         self,
         caller_fragment: str,
         project: str | None = None,
         skip: int = 0,
-        limit: int = 100,
+        limit: int = 25,
+        compact: bool = True,
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
+        skip_value = _bounded_skip(skip)
+        limit_value = _bounded_limit(limit, default=25, maximum=100)
         rows = self.client.run(
             """
             MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
@@ -428,11 +626,241 @@ class MemgraphIngesterTools:
             {
                 "project": project_name,
                 "fragment": caller_fragment,
-                "skip": _bounded_skip(skip),
-                "limit": _bounded_limit(limit, default=100, maximum=300),
+                "skip": skip_value,
+                "limit": limit_value,
             },
         )
-        return {"project": project_name, "callees": rows}
+        count_rows = self.client.run(
+            """
+            MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
+            WHERE caller.signature CONTAINS $fragment
+            RETURN count(*) AS count
+            """,
+            {"project": project_name, "fragment": caller_fragment},
+        )
+        total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
+        if compact:
+            rows = [
+                {
+                    "callerOwner": row.get("callerOwner"),
+                    "callee": row.get("calleeSignature"),
+                    "owner": row.get("calleeOwner"),
+                }
+                for row in rows
+            ]
+        return _with_result_meta(
+            {"project": project_name, "callees": rows},
+            rows,
+            skip=skip_value,
+            limit=limit_value,
+            total_count=total_count,
+            extra={"compact": compact},
+        )
+
+    def code_hot_paths(
+        self,
+        project: str | None = None,
+        limit: int = 20,
+        include_tests: bool = False,
+        include_evidence: bool = True,
+    ) -> dict[str, Any]:
+        project_name = self.resolve_project(project)
+        bounded_limit = _bounded_limit(limit, default=20, maximum=50)
+        params = {
+            "project": project_name,
+            "limit": bounded_limit,
+            "include_tests": include_tests,
+        }
+        largest_types = self.client.run(
+            """
+            MATCH (file:File {project: $project})-[:DEFINES]->(type {project: $project})
+            WHERE ($include_tests OR NOT file.path STARTS WITH 'src/test/')
+              AND (type:Class OR type:Interface OR type:Annotation)
+            OPTIONAL MATCH (type)-[:DECLARES]->(method:Method {project: $project})
+            WITH file, type, count(DISTINCT method) AS methods
+            RETURN 'type' AS kind, type.fqn AS id, labels(type)[0] AS label,
+                   methods AS score, file.path AS path, null AS startLine, null AS endLine
+            ORDER BY score DESC, id
+            LIMIT $limit
+            """,
+            params,
+        )
+        longest_methods = self.client.run(
+            """
+            MATCH (file:File {project: $project})-[:DEFINES]->(method:Method {project: $project})
+            WHERE ($include_tests OR NOT file.path STARTS WITH 'src/test/')
+              AND method.startLine IS NOT NULL AND method.endLine IS NOT NULL
+              AND coalesce(method.isSynthetic, false) = false
+            WITH file, method, method.endLine - method.startLine + 1 AS lines
+            RETURN 'method' AS kind, method.signature AS id, method.ownerDisplayName AS label,
+                   lines AS score, file.path AS path,
+                   method.startLine AS startLine, method.endLine AS endLine
+            ORDER BY score DESC, id
+            LIMIT $limit
+            """,
+            params,
+        )
+        fan_in = self.client.run(
+            """
+            MATCH (caller:Method {project: $project})
+              -[call:CALLS]->(method:Method {project: $project})
+            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
+            WITH method, file, count(call) AS callers
+            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
+            RETURN 'fanIn' AS kind, method.signature AS id, method.ownerDisplayName AS label,
+                   callers AS score, file.path AS path,
+                   method.startLine AS startLine, method.endLine AS endLine
+            ORDER BY score DESC, id
+            LIMIT $limit
+            """,
+            params,
+        )
+        fan_out = self.client.run(
+            """
+            MATCH (method:Method {project: $project})-[call:CALLS]->(:Method {project: $project})
+            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
+            WITH method, file, count(call) AS callees
+            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
+            RETURN 'fanOut' AS kind, method.signature AS id, method.ownerDisplayName AS label,
+                   callees AS score, file.path AS path,
+                   method.startLine AS startLine, method.endLine AS endLine
+            ORDER BY score DESC, id
+            LIMIT $limit
+            """,
+            params,
+        )
+        rows: list[dict[str, Any]] = []
+        for section, section_rows in (
+            ("largestTypes", largest_types),
+            ("longestMethods", longest_methods),
+            ("fanIn", fan_in),
+            ("fanOut", fan_out),
+        ):
+            for row in section_rows:
+                row["section"] = section
+                if not include_evidence:
+                    row.pop("path", None)
+                    row.pop("startLine", None)
+                    row.pop("endLine", None)
+                rows.append(row)
+        return _with_result_meta(
+            {
+                "project": project_name,
+                "includeTests": include_tests,
+                "hotPaths": rows,
+            },
+            rows,
+            limit=bounded_limit,
+            extra={"includeEvidence": include_evidence},
+        )
+
+    def code_quality_stats(
+        self,
+        project: str | None = None,
+        include_tests: bool = True,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        project_name = self.resolve_project(project)
+        bounded_limit = _bounded_limit(limit, default=20, maximum=50)
+        params = {
+            "project": project_name,
+            "limit": bounded_limit,
+            "include_tests": include_tests,
+        }
+        inventory = self.client.run(
+            """
+            MATCH (n {project: $project})
+            RETURN labels(n) AS labels, count(n) AS count
+            ORDER BY count DESC
+            """,
+            {"project": project_name},
+        )
+        method_lengths = self.client.run(
+            """
+            MATCH (file:File {project: $project})-[:DEFINES]->(method:Method {project: $project})
+            WHERE ($include_tests OR NOT file.path STARTS WITH 'src/test/')
+              AND method.startLine IS NOT NULL AND method.endLine IS NOT NULL
+              AND coalesce(method.isSynthetic, false) = false
+            WITH method.endLine - method.startLine + 1 AS lines
+            RETURN count(lines) AS methods,
+                   round(avg(lines) * 100) / 100 AS avgLines,
+                   max(lines) AS maxLines,
+                   sum(CASE WHEN lines >= 50 THEN 1 ELSE 0 END) AS methods50Plus,
+                   sum(CASE WHEN lines >= 100 THEN 1 ELSE 0 END) AS methods100Plus
+            """,
+            params,
+        )
+        fan_out = self.client.run(
+            """
+            MATCH (method:Method {project: $project})
+            OPTIONAL MATCH (method)-[call:CALLS]->(:Method {project: $project})
+            WITH method, count(call) AS degree
+            RETURN count(method) AS methods,
+                   round(avg(degree) * 100) / 100 AS avgOut,
+                   max(degree) AS maxOut,
+                   sum(CASE WHEN degree >= 10 THEN 1 ELSE 0 END) AS methodsOut10Plus,
+                   sum(CASE WHEN degree = 0 THEN 1 ELSE 0 END) AS methodsOut0
+            """,
+            {"project": project_name},
+        )
+        fan_in = self.client.run(
+            """
+            MATCH (method:Method {project: $project})
+            OPTIONAL MATCH (:Method {project: $project})-[call:CALLS]->(method)
+            WITH method, count(call) AS degree
+            RETURN count(method) AS methods,
+                   round(avg(degree) * 100) / 100 AS avgIn,
+                   max(degree) AS maxIn,
+                   sum(CASE WHEN degree >= 10 THEN 1 ELSE 0 END) AS methodsIn10Plus,
+                   sum(CASE WHEN degree = 0 THEN 1 ELSE 0 END) AS methodsIn0
+            """,
+            {"project": project_name},
+        )
+        type_sizes = self.client.run(
+            """
+            MATCH (type {project: $project})
+            WHERE type:Class OR type:Interface OR type:Annotation
+            OPTIONAL MATCH (type)-[:DECLARES]->(method:Method {project: $project})
+            WITH type, count(method) AS methods
+            RETURN count(type) AS types,
+                   round(avg(methods) * 100) / 100 AS avgMethodsPerType,
+                   max(methods) AS maxMethodsPerType,
+                   sum(CASE WHEN methods >= 25 THEN 1 ELSE 0 END) AS types25MethodsPlus,
+                   sum(CASE WHEN methods >= 50 THEN 1 ELSE 0 END) AS types50MethodsPlus
+            """,
+            {"project": project_name},
+        )
+        chunks_by_label = self.client.run(
+            """
+            MATCH (chunk:CodeChunk {project: $project})
+            RETURN chunk.sourceLabel AS sourceLabel, count(chunk) AS chunks
+            ORDER BY chunks DESC, sourceLabel
+            """,
+            {"project": project_name},
+        )
+        files_by_methods = self.client.run(
+            """
+            MATCH (file:File {project: $project})-[:DEFINES]->(method:Method {project: $project})
+            WHERE $include_tests OR NOT file.path STARTS WITH 'src/test/'
+            RETURN file.path AS path, count(method) AS methods
+            ORDER BY methods DESC, path
+            LIMIT $limit
+            """,
+            params,
+        )
+        response = {
+            "project": project_name,
+            "includeTests": include_tests,
+            "inventory": inventory,
+            "methodLengths": method_lengths[0] if method_lengths else {},
+            "fanOut": fan_out[0] if fan_out else {},
+            "fanIn": fan_in[0] if fan_in else {},
+            "typeSizes": type_sizes[0] if type_sizes else {},
+            "chunksByLabel": chunks_by_label,
+            "filesByMethods": files_by_methods,
+        }
+        response["meta"] = {"limit": bounded_limit, "resultChars": _json_size(response)}
+        return response
 
     def code_hierarchy(self, fqn: str, project: str | None = None) -> dict[str, Any]:
         project_name = self.resolve_project(project)
@@ -929,10 +1357,15 @@ class MemgraphIngesterTools:
         _ensure_read_only_query(query)
         _ensure_project_scoped(query)
         params = dict(parameters or {})
+        bounded_limit = _bounded_limit(limit, default=200, maximum=500)
         params.setdefault("project", project_name)
-        params.setdefault("limit", _bounded_limit(limit, default=200, maximum=500))
+        params.setdefault("limit", bounded_limit)
         rows = self.client.run(query, params)
-        return {"project": project_name, "rows": rows}
+        return _with_result_meta(
+            {"project": project_name, "rows": rows},
+            rows,
+            limit=bounded_limit,
+        )
 
     def _validated_memory_fields(
         self,
