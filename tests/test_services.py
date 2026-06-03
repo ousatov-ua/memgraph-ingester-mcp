@@ -202,7 +202,6 @@ def test_code_lookup_type_is_compact_by_default():
     assert item["memberCounts"] == {"methods": 7, "fields": 2}
     assert "methods" not in item
     assert "fields" not in item
-    assert result["meta"]["includeMembers"] is False
     assert all("ORDER BY m.name" not in call["query"] for call in client.calls)
 
 
@@ -269,7 +268,6 @@ def test_code_lookup_type_compact_omits_low_value_type_fields():
     assert "language" not in item
     assert "framework" not in item
     assert "modulePath" not in item
-    assert result["meta"]["compact"] is True
 
 
 def test_code_lookup_type_table_json_compacts_nested_members():
@@ -305,7 +303,6 @@ def test_code_search_omits_text_and_dedupes_by_default():
     assert len(result["hits"]) == 1
     assert "text" not in result["hits"][0]
     assert "chunk.text AS text" not in client.calls[0]["query"]
-    assert result["meta"]["dedupeBySource"] is True
 
 
 def test_code_search_can_include_bounded_text():
@@ -398,7 +395,6 @@ def test_code_callees_can_return_legacy_shape():
 
     assert client.calls[0]["parameters"]["limit"] == 5
     assert "callerSignature" in result["callees"][0]
-    assert result["meta"]["compact"] is False
 
 
 def test_code_orientation_runs_only_requested_sections():
@@ -421,10 +417,8 @@ def test_code_hot_paths_returns_compact_sections():
 
     assert result["meta"]["includeEvidence"] is False
     assert {row["section"] for row in result["hotPaths"]} == {
-        "largestTypes",
         "longestMethods",
         "fanIn",
-        "fanOut",
     }
 
 
@@ -457,10 +451,8 @@ def test_code_hot_paths_can_return_table_json():
 
     assert result["hotPaths"]["cols"] == ["ok", "section"]
     assert result["hotPaths"]["rows"] == [
-        [True, "largestTypes"],
         [True, "longestMethods"],
         [True, "fanIn"],
-        [True, "fanOut"],
     ]
     assert result["meta"]["format"] == "table_json"
 
@@ -714,7 +706,6 @@ def test_code_lookup_methods_can_return_compact_ranges():
     assert "method.startLine AS startLine" in query
     assert "method.returnType AS returnType" not in query
     assert "method.isSynthetic AS isSynthetic" not in query
-    assert result["meta"]["compact"] is True
 
 
 def test_code_lookup_methods_can_return_table_json():

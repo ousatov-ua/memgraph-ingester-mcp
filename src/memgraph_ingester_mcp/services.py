@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
-from json import dumps
 from typing import Any
 
 from memgraph_ingester_mcp.config import MemgraphConfig
@@ -60,10 +59,6 @@ def _bounded_text_limit(limit: int) -> int:
     return min(limit, 2_000)
 
 
-def _json_size(value: Mapping[str, Any]) -> int:
-    return len(dumps(value, default=str, separators=(",", ":"), sort_keys=True))
-
-
 def _normalize_output_format(output_format: str | None) -> str:
     if output_format is None:
         return "json"
@@ -106,8 +101,6 @@ def _format_response(
     meta = formatted.setdefault("meta", {})
     if isinstance(meta, dict):
         meta["format"] = normalized
-        meta.pop("resultChars", None)
-        meta["resultChars"] = _json_size(formatted)
     return formatted
 
 
@@ -134,7 +127,6 @@ def _with_result_meta(
     if extra:
         meta.update(extra)
     response["meta"] = meta
-    meta["resultChars"] = _json_size(response)
     return response
 
 
@@ -368,7 +360,6 @@ class MemgraphIngesterTools:
                 """,
                 {"project": project_name, "limit": bounded_limit},
             )
-        response["meta"] = {"resultChars": _json_size(response)}
         return response
 
     def code_search(
@@ -436,11 +427,6 @@ class MemgraphIngesterTools:
                 {"project": project_name, "query": query, "hits": rows},
                 rows,
                 limit=bounded_limit,
-                extra={
-                    "includeText": include_text,
-                    "textLimit": bounded_text_limit,
-                    "dedupeBySource": dedupe_by_source,
-                },
             ),
             output_format,
         )
@@ -567,12 +553,6 @@ class MemgraphIngesterTools:
                 types,
                 limit=bounded_limit,
                 total_count=total_count,
-                extra={
-                    "includeMembers": include_members,
-                    "memberLimit": bounded_member_limit if include_members else None,
-                    "memberSummary": member_summary,
-                    "compact": compact,
-                },
             ),
             output_format,
         )
@@ -582,14 +562,14 @@ class MemgraphIngesterTools:
         signature_fragment: str,
         project: str | None = None,
         skip: int = 0,
-        limit: int = 50,
+        limit: int = 10,
         compact: bool = False,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         return_projection = (
             """
-                   method.signature AS signature, method.name AS name,
+                   method.signature AS signature,
                    method.ownerFqn AS ownerFqn, method.ownerDisplayName AS ownerDisplayName,
                    method.startLine AS startLine, method.endLine AS endLine,
                    collect(DISTINCT file.path) AS files
@@ -618,7 +598,7 @@ class MemgraphIngesterTools:
                 "project": project_name,
                 "fragment": signature_fragment,
                 "skip": _bounded_skip(skip),
-                "limit": _bounded_limit(limit, default=50, maximum=200),
+                "limit": _bounded_limit(limit, default=10, maximum=200),
             },
         )
         count_rows = self.client.run(
@@ -631,7 +611,7 @@ class MemgraphIngesterTools:
         )
         total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
         skip_value = _bounded_skip(skip)
-        limit_value = _bounded_limit(limit, default=50, maximum=200)
+        limit_value = _bounded_limit(limit, default=10, maximum=200)
         return _format_response(
             _with_result_meta(
                 {"project": project_name, "methods": rows},
@@ -639,7 +619,6 @@ class MemgraphIngesterTools:
                 skip=skip_value,
                 limit=limit_value,
                 total_count=total_count,
-                extra={"compact": compact},
             ),
             output_format,
         )
@@ -704,7 +683,6 @@ class MemgraphIngesterTools:
                 skip=skip_value,
                 limit=limit_value,
                 total_count=total_count,
-                extra={"compact": compact},
             ),
             output_format,
         )
@@ -728,7 +706,9 @@ class MemgraphIngesterTools:
             RETURN caller.signature AS callerSignature,
                    caller.ownerDisplayName AS callerOwner,
                    callee.signature AS calleeSignature,
-                   callee.ownerDisplayName AS calleeOwner
+                   callee.ownerDisplayName AS calleeOwner,
+                   callee.startLine AS calleeStartLine,
+                   callee.endLine AS calleeEndLine
             ORDER BY caller.signature, callee.signature
             SKIP $skip
             LIMIT $limit
@@ -755,6 +735,8 @@ class MemgraphIngesterTools:
                     "callerOwner": row.get("callerOwner"),
                     "callee": row.get("calleeSignature"),
                     "owner": row.get("calleeOwner"),
+                    "startLine": row.get("calleeStartLine"),
+                    "endLine": row.get("calleeEndLine"),
                 }
                 for row in rows
             ]
@@ -765,7 +747,6 @@ class MemgraphIngesterTools:
                 skip=skip_value,
                 limit=limit_value,
                 total_count=total_count,
-                extra={"compact": compact},
             ),
             output_format,
         )
@@ -784,7 +765,7 @@ class MemgraphIngesterTools:
         requested_sections = _normalize_sections(
             sections,
             allowed=HOT_PATH_SECTIONS,
-            default=HOT_PATH_SECTIONS,
+            default=frozenset({"fanIn", "longestMethods"}),
         )
         params = {
             "project": project_name,
@@ -1008,7 +989,7 @@ class MemgraphIngesterTools:
             "chunksByLabel": chunks_by_label,
             "filesByMethods": files_by_methods,
         }
-        response["meta"] = {"limit": bounded_limit, "resultChars": _json_size(response)}
+        response["meta"] = {"limit": bounded_limit}
         return _format_response(response, output_format)
 
     def code_hierarchy(self, fqn: str, project: str | None = None) -> dict[str, Any]:
