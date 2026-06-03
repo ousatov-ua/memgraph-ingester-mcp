@@ -646,12 +646,14 @@ class MemgraphIngesterTools:
             """
             MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
             WHERE callee.signature CONTAINS $fragment
+            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
             RETURN caller.signature AS callerSignature,
                    caller.ownerDisplayName AS callerOwner,
                    caller.startLine AS callerStartLine,
                    caller.endLine AS callerEndLine,
                    callee.signature AS calleeSignature,
-                   callee.ownerDisplayName AS calleeOwner
+                   callee.ownerDisplayName AS calleeOwner,
+                   callerFile.path AS callerPath
             ORDER BY caller.signature, callee.signature
             SKIP $skip
             LIMIT $limit
@@ -677,6 +679,7 @@ class MemgraphIngesterTools:
                 {
                     "caller": row.get("callerSignature"),
                     "owner": row.get("callerOwner"),
+                    "path": row.get("callerPath"),
                     "startLine": row.get("callerStartLine"),
                     "endLine": row.get("callerEndLine"),
                     "callee": row.get("calleeSignature"),
@@ -711,12 +714,14 @@ class MemgraphIngesterTools:
             """
             MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
             WHERE caller.signature CONTAINS $fragment
+            OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
             RETURN caller.signature AS callerSignature,
                    caller.ownerDisplayName AS callerOwner,
                    callee.signature AS calleeSignature,
                    callee.ownerDisplayName AS calleeOwner,
                    callee.startLine AS calleeStartLine,
-                   callee.endLine AS calleeEndLine
+                   callee.endLine AS calleeEndLine,
+                   calleeFile.path AS calleePath
             ORDER BY caller.signature, callee.signature
             SKIP $skip
             LIMIT $limit
@@ -743,6 +748,7 @@ class MemgraphIngesterTools:
                     "callerOwner": row.get("callerOwner"),
                     "callee": row.get("calleeSignature"),
                     "owner": row.get("calleeOwner"),
+                    "path": row.get("calleePath"),
                     "startLine": row.get("calleeStartLine"),
                     "endLine": row.get("calleeEndLine"),
                 }

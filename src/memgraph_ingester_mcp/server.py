@@ -45,7 +45,7 @@ def create_server(
         include_text: bool = False,
         text_limit: int = 160,
         dedupe_by_source: bool = True,
-        format: str = "json",
+        format: str = "table_json",
     ) -> dict[str, Any]:
         """Search CodeChunk embeddings and return source-linked discovery hits."""
 
@@ -66,10 +66,10 @@ def create_server(
         fqn: str | None = None,
         include_members: bool = False,
         member_limit: int = 50,
-        member_summary: bool = True,
+        member_summary: bool = False,
         limit: int = 20,
-        compact: bool = False,
-        format: str = "json",
+        compact: bool = True,
+        format: str = "table_json",
     ) -> dict[str, Any]:
         """Look up classes, interfaces, or annotations by simple name or FQN."""
 
@@ -91,8 +91,8 @@ def create_server(
         project: str | None = None,
         skip: int = 0,
         limit: int = 50,
-        compact: bool = False,
-        format: str = "json",
+        compact: bool = True,
+        format: str = "table_json",
     ) -> dict[str, Any]:
         """Find methods by signature fragment and return exact source ranges."""
 
@@ -112,7 +112,7 @@ def create_server(
         skip: int = 0,
         limit: int = 25,
         compact: bool = True,
-        format: str = "json",
+        format: str = "table_json",
     ) -> dict[str, Any]:
         """List methods that call matching callee signatures."""
 
@@ -132,7 +132,7 @@ def create_server(
         skip: int = 0,
         limit: int = 25,
         compact: bool = True,
-        format: str = "json",
+        format: str = "table_json",
     ) -> dict[str, Any]:
         """List callees invoked by matching caller signatures."""
 
@@ -150,9 +150,9 @@ def create_server(
         project: str | None = None,
         limit: int = 20,
         include_tests: bool = False,
-        include_evidence: bool = True,
+        include_evidence: bool = False,
         sections: list[str] | None = None,
-        format: str = "json",
+        format: str = "table_json",
     ) -> dict[str, Any]:
         """Return compact hot-path candidates from type size, method size, fan-in, and fan-out."""
 
@@ -170,7 +170,7 @@ def create_server(
         project: str | None = None,
         include_tests: bool = True,
         limit: int = 20,
-        format: str = "json",
+        format: str = "table_json",
     ) -> dict[str, Any]:
         """Return compact graph-wide code quality and quantity metrics."""
 
@@ -302,7 +302,7 @@ def create_server(
         project: str | None = None,
         parameters: dict[str, Any] | None = None,
         limit: int = 200,
-        format: str = "json",
+        format: str = "table_json",
     ) -> dict[str, Any]:
         """Run a project-scoped read-only Cypher query as a last-resort escape hatch."""
 

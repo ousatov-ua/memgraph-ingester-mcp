@@ -172,6 +172,18 @@ class CallGraphClient:
         self.calls.append({"query": query, "parameters": params, "write": write})
         if "RETURN count(*) AS count" in query:
             return [{"count": 100}]
+        if "calleeFile.path AS calleePath" in query:
+            return [
+                {
+                    "callerSignature": "demo.Foo.a()",
+                    "callerOwner": "Foo",
+                    "calleeSignature": "demo.Bar.b()",
+                    "calleeOwner": "Bar",
+                    "calleeStartLine": 30,
+                    "calleeEndLine": 40,
+                    "calleePath": "src/main/java/demo/Bar.java",
+                }
+            ]
         return [
             {
                 "callerSignature": "demo.Foo.a()",
@@ -180,6 +192,7 @@ class CallGraphClient:
                 "callerEndLine": 20,
                 "calleeSignature": "demo.Bar.b()",
                 "calleeOwner": "Bar",
+                "callerPath": "src/main/java/demo/Foo.java",
             }
         ]
 
@@ -362,6 +375,7 @@ def test_code_callers_are_compact_and_low_limit_by_default():
         {
             "caller": "demo.Foo.a()",
             "owner": "Foo",
+            "path": "src/main/java/demo/Foo.java",
             "startLine": 10,
             "endLine": 20,
             "callee": "demo.Bar.b()",
@@ -381,12 +395,23 @@ def test_code_callers_can_return_table_json():
     assert result["callers"]["cols"] == [
         "caller",
         "owner",
+        "path",
         "startLine",
         "endLine",
         "callee",
         "calleeOwner",
     ]
-    assert result["callers"]["rows"] == [["demo.Foo.a()", "Foo", 10, 20, "demo.Bar.b()", "Bar"]]
+    assert result["callers"]["rows"] == [
+        [
+            "demo.Foo.a()",
+            "Foo",
+            "src/main/java/demo/Foo.java",
+            10,
+            20,
+            "demo.Bar.b()",
+            "Bar",
+        ]
+    ]
     assert result["meta"]["format"] == "table_json"
 
 
@@ -398,6 +423,45 @@ def test_code_callees_can_return_legacy_shape():
 
     assert client.calls[0]["parameters"]["limit"] == 5
     assert "callerSignature" in result["callees"][0]
+    assert "calleePath" in result["callees"][0]
+
+
+def test_code_callees_compact_includes_path():
+    client = CallGraphClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_callees("demo.Foo", compact=True)
+
+    assert result["callees"] == [
+        {
+            "callerOwner": "Foo",
+            "callee": "demo.Bar.b()",
+            "owner": "Bar",
+            "path": "src/main/java/demo/Bar.java",
+            "startLine": 30,
+            "endLine": 40,
+        }
+    ]
+
+
+def test_code_callees_compact_can_return_table_json():
+    client = CallGraphClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_callees("demo.Foo", compact=True, output_format="table_json")
+
+    assert result["callees"]["cols"] == [
+        "callerOwner",
+        "callee",
+        "owner",
+        "path",
+        "startLine",
+        "endLine",
+    ]
+    assert result["callees"]["rows"] == [
+        ["Foo", "demo.Bar.b()", "Bar", "src/main/java/demo/Bar.java", 30, 40]
+    ]
+    assert result["meta"]["format"] == "table_json"
 
 
 def test_code_orientation_runs_only_requested_sections():

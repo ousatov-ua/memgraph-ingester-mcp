@@ -1,6 +1,6 @@
 [project]
 name = "memgraph-ingester-mcp"
-version = "0.1.14"
+version = "0.1.15"
 description = "MCP tools for Memgraph graphs created by memgraph-ingester"
 readme = "README.md"
 requires-python = ">=3.11"
