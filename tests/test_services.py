@@ -239,6 +239,40 @@ def test_code_search_can_include_bounded_text():
     assert "chunk.text AS text" in client.calls[0]["query"]
 
 
+def test_code_search_can_return_table_json():
+    client = SearchClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_search("hot path", output_format="table_json")
+
+    assert result["hits"]["cols"] == [
+        "sourceType",
+        "sourceId",
+        "path",
+        "ownerFqn",
+        "signature",
+        "similarity",
+    ]
+    assert result["hits"]["rows"] == [
+        [
+            ["Method"],
+            "demo.Foo.a()",
+            "src/main/java/demo/Foo.java",
+            "demo.Foo",
+            "demo.Foo.a()",
+            0.9,
+        ]
+    ]
+    assert result["meta"]["format"] == "table_json"
+
+
+def test_table_json_rejects_unknown_format():
+    tools = make_tools()
+
+    with pytest.raises(MemgraphError, match="Unsupported format"):
+        tools.code_hot_paths(output_format="yaml")
+
+
 def test_code_callers_are_compact_and_low_limit_by_default():
     client = CallGraphClient()
     tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
@@ -257,6 +291,23 @@ def test_code_callers_are_compact_and_low_limit_by_default():
     ]
     assert result["meta"]["totalCount"] == 100
     assert result["meta"]["hasMore"] is True
+
+
+def test_code_callers_can_return_table_json():
+    client = CallGraphClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_callers("demo.Bar.b", output_format="table_json")
+
+    assert result["callers"]["cols"] == [
+        "caller",
+        "owner",
+        "startLine",
+        "endLine",
+        "calleeOwner",
+    ]
+    assert result["callers"]["rows"] == [["demo.Foo.a()", "Foo", 10, 20, "Bar"]]
+    assert result["meta"]["format"] == "table_json"
 
 
 def test_code_callees_can_return_legacy_shape():
@@ -297,6 +348,21 @@ def test_code_hot_paths_returns_compact_sections():
     }
 
 
+def test_code_hot_paths_can_return_table_json():
+    tools = make_tools()
+
+    result = tools.code_hot_paths(limit=2, include_evidence=False, output_format="table_json")
+
+    assert result["hotPaths"]["cols"] == ["ok", "section"]
+    assert result["hotPaths"]["rows"] == [
+        [True, "largestTypes"],
+        [True, "longestMethods"],
+        [True, "fanIn"],
+        [True, "fanOut"],
+    ]
+    assert result["meta"]["format"] == "table_json"
+
+
 def test_code_quality_stats_returns_aggregate_sections():
     tools = make_tools()
 
@@ -308,6 +374,18 @@ def test_code_quality_stats_returns_aggregate_sections():
     assert "fanIn" in result
     assert "fanOut" in result
     assert result["meta"]["limit"] == 3
+
+
+def test_code_quality_stats_can_return_table_json_sections():
+    tools = make_tools()
+
+    result = tools.code_quality_stats(limit=3, output_format="table_json")
+
+    assert result["inventory"] == {"cols": ["ok"], "rows": [[True]]}
+    assert result["chunksByLabel"] == {"cols": ["ok"], "rows": [[True]]}
+    assert result["filesByMethods"] == {"cols": ["ok"], "rows": [[True]]}
+    assert result["methodLengths"] == {"ok": True}
+    assert result["meta"]["format"] == "table_json"
 
 
 def test_memory_schema_lists_fields_controlled_values_and_targets():
@@ -487,6 +565,18 @@ def test_raw_read_cypher_adds_project_and_bounds_limit():
     assert call["write"] is False
 
 
+def test_raw_read_cypher_can_return_table_json():
+    tools = make_tools()
+
+    result = tools.raw_read_cypher(
+        "MATCH (n {project: $project}) RETURN n LIMIT $limit",
+        output_format="table_json",
+    )
+
+    assert result["rows"] == {"cols": ["ok"], "rows": [[True]]}
+    assert result["meta"]["format"] == "table_json"
+
+
 def test_code_lookup_type_orders_by_return_alias_after_collect():
     tools = make_tools()
 
@@ -523,6 +613,15 @@ def test_code_lookup_methods_can_return_compact_ranges():
     assert "method.returnType AS returnType" not in query
     assert "method.isSynthetic AS isSynthetic" not in query
     assert result["meta"]["compact"] is True
+
+
+def test_code_lookup_methods_can_return_table_json():
+    tools = make_tools()
+
+    result = tools.code_lookup_methods("GraphWriter", compact=True, output_format="table_json")
+
+    assert result["methods"] == {"cols": ["ok"], "rows": [[True]]}
+    assert result["meta"]["format"] == "table_json"
 
 
 def test_memory_orientation_can_be_compact():

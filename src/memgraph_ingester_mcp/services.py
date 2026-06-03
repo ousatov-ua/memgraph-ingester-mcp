@@ -34,6 +34,8 @@ CONTROLLED_VALUES: dict[tuple[str, str], frozenset[str]] = {
     ("Idea", "status"): frozenset({"proposed", "accepted", "rejected", "obsolete"}),
 }
 
+OUTPUT_FORMATS = frozenset({"json", "table_json"})
+
 
 def _bounded_limit(limit: int, *, default: int, maximum: int) -> int:
     if limit <= 0:
@@ -59,6 +61,53 @@ def _bounded_text_limit(limit: int) -> int:
 
 def _json_size(value: Mapping[str, Any]) -> int:
     return len(dumps(value, default=str, separators=(",", ":"), sort_keys=True))
+
+
+def _normalize_output_format(output_format: str | None) -> str:
+    if output_format is None:
+        return "json"
+    normalized = output_format.strip()
+    if normalized not in OUTPUT_FORMATS:
+        allowed = ", ".join(sorted(OUTPUT_FORMATS))
+        raise MemgraphError(f"Unsupported format {output_format!r}. Allowed: {allowed}.")
+    return normalized
+
+
+def _to_table_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _to_table_json(item) for key, item in value.items()}
+    if isinstance(value, list) and value and all(isinstance(item, Mapping) for item in value):
+        columns: list[str] = []
+        for row in value:
+            for key in row:
+                column = str(key)
+                if column not in columns:
+                    columns.append(column)
+        return {
+            "cols": columns,
+            "rows": [[row.get(column) for column in columns] for row in value],
+        }
+    return value
+
+
+def _format_response(
+    response: dict[str, Any],
+    output_format: str | None = "json",
+) -> dict[str, Any]:
+    normalized = _normalize_output_format(output_format)
+    if normalized == "json":
+        return response
+
+    formatted = _to_table_json(response)
+    if not isinstance(formatted, dict):  # pragma: no cover - response is always a dict today.
+        raise MemgraphError("Formatted response must be an object.")
+
+    meta = formatted.setdefault("meta", {})
+    if isinstance(meta, dict):
+        meta["format"] = normalized
+        meta.pop("resultChars", None)
+        meta["resultChars"] = _json_size(formatted)
+    return formatted
 
 
 def _with_result_meta(
@@ -329,6 +378,7 @@ class MemgraphIngesterTools:
         include_text: bool = False,
         text_limit: int = 160,
         dedupe_by_source: bool = True,
+        output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         bounded_limit = _bounded_limit(limit, default=10, maximum=25)
@@ -380,15 +430,18 @@ class MemgraphIngesterTools:
                 row["text"] = _compact_text(row.get("text"), bounded_text_limit)
             else:
                 row.pop("text", None)
-        return _with_result_meta(
-            {"project": project_name, "query": query, "hits": rows},
-            rows,
-            limit=bounded_limit,
-            extra={
-                "includeText": include_text,
-                "textLimit": bounded_text_limit,
-                "dedupeBySource": dedupe_by_source,
-            },
+        return _format_response(
+            _with_result_meta(
+                {"project": project_name, "query": query, "hits": rows},
+                rows,
+                limit=bounded_limit,
+                extra={
+                    "includeText": include_text,
+                    "textLimit": bounded_text_limit,
+                    "dedupeBySource": dedupe_by_source,
+                },
+            ),
+            output_format,
         )
 
     def code_lookup_type(
@@ -497,6 +550,7 @@ class MemgraphIngesterTools:
         skip: int = 0,
         limit: int = 50,
         compact: bool = False,
+        output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         return_projection = (
@@ -544,13 +598,16 @@ class MemgraphIngesterTools:
         total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
         skip_value = _bounded_skip(skip)
         limit_value = _bounded_limit(limit, default=50, maximum=200)
-        return _with_result_meta(
-            {"project": project_name, "methods": rows},
-            rows,
-            skip=skip_value,
-            limit=limit_value,
-            total_count=total_count,
-            extra={"compact": compact},
+        return _format_response(
+            _with_result_meta(
+                {"project": project_name, "methods": rows},
+                rows,
+                skip=skip_value,
+                limit=limit_value,
+                total_count=total_count,
+                extra={"compact": compact},
+            ),
+            output_format,
         )
 
     def code_callers(
@@ -560,6 +617,7 @@ class MemgraphIngesterTools:
         skip: int = 0,
         limit: int = 25,
         compact: bool = True,
+        output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         skip_value = _bounded_skip(skip)
@@ -605,13 +663,16 @@ class MemgraphIngesterTools:
                 }
                 for row in rows
             ]
-        return _with_result_meta(
-            {"project": project_name, "callers": rows},
-            rows,
-            skip=skip_value,
-            limit=limit_value,
-            total_count=total_count,
-            extra={"compact": compact},
+        return _format_response(
+            _with_result_meta(
+                {"project": project_name, "callers": rows},
+                rows,
+                skip=skip_value,
+                limit=limit_value,
+                total_count=total_count,
+                extra={"compact": compact},
+            ),
+            output_format,
         )
 
     def code_callees(
@@ -621,6 +682,7 @@ class MemgraphIngesterTools:
         skip: int = 0,
         limit: int = 25,
         compact: bool = True,
+        output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         skip_value = _bounded_skip(skip)
@@ -662,13 +724,16 @@ class MemgraphIngesterTools:
                 }
                 for row in rows
             ]
-        return _with_result_meta(
-            {"project": project_name, "callees": rows},
-            rows,
-            skip=skip_value,
-            limit=limit_value,
-            total_count=total_count,
-            extra={"compact": compact},
+        return _format_response(
+            _with_result_meta(
+                {"project": project_name, "callees": rows},
+                rows,
+                skip=skip_value,
+                limit=limit_value,
+                total_count=total_count,
+                extra={"compact": compact},
+            ),
+            output_format,
         )
 
     def code_hot_paths(
@@ -677,6 +742,7 @@ class MemgraphIngesterTools:
         limit: int = 20,
         include_tests: bool = False,
         include_evidence: bool = True,
+        output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         bounded_limit = _bounded_limit(limit, default=20, maximum=50)
@@ -757,15 +823,18 @@ class MemgraphIngesterTools:
                     row.pop("startLine", None)
                     row.pop("endLine", None)
                 rows.append(row)
-        return _with_result_meta(
-            {
-                "project": project_name,
-                "includeTests": include_tests,
-                "hotPaths": rows,
-            },
-            rows,
-            limit=bounded_limit,
-            extra={"includeEvidence": include_evidence},
+        return _format_response(
+            _with_result_meta(
+                {
+                    "project": project_name,
+                    "includeTests": include_tests,
+                    "hotPaths": rows,
+                },
+                rows,
+                limit=bounded_limit,
+                extra={"includeEvidence": include_evidence},
+            ),
+            output_format,
         )
 
     def code_quality_stats(
@@ -773,6 +842,7 @@ class MemgraphIngesterTools:
         project: str | None = None,
         include_tests: bool = True,
         limit: int = 20,
+        output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         bounded_limit = _bounded_limit(limit, default=20, maximum=50)
@@ -874,7 +944,7 @@ class MemgraphIngesterTools:
             "filesByMethods": files_by_methods,
         }
         response["meta"] = {"limit": bounded_limit, "resultChars": _json_size(response)}
-        return response
+        return _format_response(response, output_format)
 
     def code_hierarchy(self, fqn: str, project: str | None = None) -> dict[str, Any]:
         project_name = self.resolve_project(project)
@@ -1401,6 +1471,7 @@ class MemgraphIngesterTools:
         project: str | None = None,
         parameters: Mapping[str, Any] | None = None,
         limit: int = 200,
+        output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         _ensure_read_only_query(query)
@@ -1410,10 +1481,13 @@ class MemgraphIngesterTools:
         params.setdefault("project", project_name)
         params.setdefault("limit", bounded_limit)
         rows = self.client.run(query, params)
-        return _with_result_meta(
-            {"project": project_name, "rows": rows},
-            rows,
-            limit=bounded_limit,
+        return _format_response(
+            _with_result_meta(
+                {"project": project_name, "rows": rows},
+                rows,
+                limit=bounded_limit,
+            ),
+            output_format,
         )
 
     def _validated_memory_fields(

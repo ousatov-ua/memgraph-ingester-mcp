@@ -45,10 +45,19 @@ def create_server(
         include_text: bool = False,
         text_limit: int = 160,
         dedupe_by_source: bool = True,
+        format: str = "json",
     ) -> dict[str, Any]:
         """Search CodeChunk embeddings and return source-linked discovery hits."""
 
-        return tools.code_search(query, project, limit, include_text, text_limit, dedupe_by_source)
+        return tools.code_search(
+            query,
+            project,
+            limit,
+            include_text,
+            text_limit,
+            dedupe_by_source,
+            output_format=format,
+        )
 
     @mcp.tool()
     def code_lookup_type(
@@ -79,10 +88,18 @@ def create_server(
         skip: int = 0,
         limit: int = 50,
         compact: bool = False,
+        format: str = "json",
     ) -> dict[str, Any]:
         """Find methods by signature fragment and return exact source ranges."""
 
-        return tools.code_lookup_methods(signature_fragment, project, skip, limit, compact)
+        return tools.code_lookup_methods(
+            signature_fragment,
+            project,
+            skip,
+            limit,
+            compact,
+            output_format=format,
+        )
 
     @mcp.tool()
     def code_callers(
@@ -91,10 +108,18 @@ def create_server(
         skip: int = 0,
         limit: int = 25,
         compact: bool = True,
+        format: str = "json",
     ) -> dict[str, Any]:
         """List methods that call matching callee signatures."""
 
-        return tools.code_callers(callee_fragment, project, skip, limit, compact)
+        return tools.code_callers(
+            callee_fragment,
+            project,
+            skip,
+            limit,
+            compact,
+            output_format=format,
+        )
 
     @mcp.tool()
     def code_callees(
@@ -103,10 +128,18 @@ def create_server(
         skip: int = 0,
         limit: int = 25,
         compact: bool = True,
+        format: str = "json",
     ) -> dict[str, Any]:
         """List callees invoked by matching caller signatures."""
 
-        return tools.code_callees(caller_fragment, project, skip, limit, compact)
+        return tools.code_callees(
+            caller_fragment,
+            project,
+            skip,
+            limit,
+            compact,
+            output_format=format,
+        )
 
     @mcp.tool()
     def code_hot_paths(
@@ -114,20 +147,22 @@ def create_server(
         limit: int = 20,
         include_tests: bool = False,
         include_evidence: bool = True,
+        format: str = "json",
     ) -> dict[str, Any]:
         """Return compact hot-path candidates from type size, method size, fan-in, and fan-out."""
 
-        return tools.code_hot_paths(project, limit, include_tests, include_evidence)
+        return tools.code_hot_paths(project, limit, include_tests, include_evidence, format)
 
     @mcp.tool()
     def code_quality_stats(
         project: str | None = None,
         include_tests: bool = True,
         limit: int = 20,
+        format: str = "json",
     ) -> dict[str, Any]:
         """Return compact graph-wide code quality and quantity metrics."""
 
-        return tools.code_quality_stats(project, include_tests, limit)
+        return tools.code_quality_stats(project, include_tests, limit, format)
 
     @mcp.tool()
     def code_hierarchy(fqn: str, project: str | None = None) -> dict[str, Any]:
@@ -255,10 +290,11 @@ def create_server(
         project: str | None = None,
         parameters: dict[str, Any] | None = None,
         limit: int = 200,
+        format: str = "json",
     ) -> dict[str, Any]:
         """Run a project-scoped read-only Cypher query as a last-resort escape hatch."""
 
-        return tools.raw_read_cypher(query, project, parameters, limit)
+        return tools.raw_read_cypher(query, project, parameters, limit, format)
 
     return mcp
 
