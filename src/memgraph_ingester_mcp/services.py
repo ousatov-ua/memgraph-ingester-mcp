@@ -496,23 +496,36 @@ class MemgraphIngesterTools:
         project: str | None = None,
         skip: int = 0,
         limit: int = 50,
+        compact: bool = False,
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
-        rows = self.client.run(
+        return_projection = (
             """
-            MATCH (method:Method {project: $project})
-            WHERE method.signature CONTAINS $fragment
-            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
-            RETURN method.signature AS signature, method.name AS name,
+                   method.signature AS signature, method.name AS name,
+                   method.ownerFqn AS ownerFqn, method.ownerDisplayName AS ownerDisplayName,
+                   method.startLine AS startLine, method.endLine AS endLine,
+                   collect(DISTINCT file.path) AS files
+            """
+            if compact
+            else """
+                   method.signature AS signature, method.name AS name,
                    method.ownerFqn AS ownerFqn, method.ownerDisplayName AS ownerDisplayName,
                    method.returnType AS returnType, method.visibility AS visibility,
                    method.startLine AS startLine, method.endLine AS endLine,
                    method.isStatic AS isStatic, method.isSynthetic AS isSynthetic,
                    collect(DISTINCT file.path) AS files
+            """
+        )
+        rows = self.client.run(
+            """
+            MATCH (method:Method {project: $project})
+            WHERE method.signature CONTAINS $fragment
+            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
+            RETURN __RETURN_PROJECTION__
             ORDER BY signature
             SKIP $skip
             LIMIT $limit
-            """,
+            """.replace("__RETURN_PROJECTION__", return_projection.strip()),
             {
                 "project": project_name,
                 "fragment": signature_fragment,
@@ -537,6 +550,7 @@ class MemgraphIngesterTools:
             skip=skip_value,
             limit=limit_value,
             total_count=total_count,
+            extra={"compact": compact},
         )
 
     def code_callers(
@@ -903,37 +917,73 @@ class MemgraphIngesterTools:
             "interfaceImplementors": implementors,
         }
 
-    def memory_orientation(self, project: str | None = None) -> dict[str, Any]:
+    def memory_orientation(
+        self,
+        project: str | None = None,
+        compact: bool = False,
+    ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
+        rule_projection = (
+            "rule.id AS id, rule.severity AS severity, rule.title AS title"
+            if compact
+            else """
+                       rule.id AS id, rule.severity AS severity, rule.title AS title,
+                       rule.description AS description
+            """.strip()
+        )
+        finding_projection = (
+            "finding.id AS id, finding.type AS type, finding.title AS title"
+            if compact
+            else """
+                       finding.id AS id, finding.type AS type, finding.title AS title,
+                       finding.summary AS summary
+            """.strip()
+        )
+        task_projection = (
+            """
+                       task.id AS id, task.title AS title, task.status AS status,
+                       task.priority AS priority
+            """.strip()
+            if compact
+            else """
+                       task.id AS id, task.title AS title, task.status AS status,
+                       task.priority AS priority, task.description AS description
+            """.strip()
+        )
+        risk_projection = (
+            "risk.id AS id, risk.title AS title, risk.severity AS severity"
+            if compact
+            else """
+                       risk.id AS id, risk.title AS title, risk.severity AS severity,
+                       risk.mitigation AS mitigation
+            """.strip()
+        )
         return {
             "project": project_name,
             "rules": self.client.run(
                 """
                 MATCH (m:Memory {project: $project})-[:HAS_RULE]->(rule:Rule)
-                RETURN rule.id AS id, rule.severity AS severity, rule.title AS title,
-                       rule.description AS description
+                RETURN __RETURN_PROJECTION__
                 ORDER BY rule.severity, rule.id
-                """,
+                """.replace("__RETURN_PROJECTION__", rule_projection),
                 {"project": project_name},
             ),
             "openFindings": self.client.run(
                 """
                 MATCH (m:Memory {project: $project})-[:HAS_FINDING]->(finding:Finding)
                 WHERE finding.status = 'open'
-                RETURN finding.id AS id, finding.type AS type, finding.title AS title,
-                       finding.summary AS summary
+                RETURN __RETURN_PROJECTION__
                 ORDER BY finding.id
-                """,
+                """.replace("__RETURN_PROJECTION__", finding_projection),
                 {"project": project_name},
             ),
             "activeTasks": self.client.run(
                 """
                 MATCH (m:Memory {project: $project})-[:HAS_TASK]->(task:Task)
                 WHERE task.status IN ['todo', 'doing', 'blocked']
-                RETURN task.id AS id, task.title AS title, task.status AS status,
-                       task.priority AS priority, task.description AS description
+                RETURN __RETURN_PROJECTION__
                 ORDER BY task.priority, task.status, task.id
-                """,
+                """.replace("__RETURN_PROJECTION__", task_projection),
                 {"project": project_name},
             ),
             "openQuestions": self.client.run(
@@ -949,10 +999,9 @@ class MemgraphIngesterTools:
                 """
                 MATCH (m:Memory {project: $project})-[:HAS_RISK]->(risk:Risk)
                 WHERE risk.status = 'open'
-                RETURN risk.id AS id, risk.title AS title, risk.severity AS severity,
-                       risk.mitigation AS mitigation
+                RETURN __RETURN_PROJECTION__
                 ORDER BY risk.severity, risk.id
-                """,
+                """.replace("__RETURN_PROJECTION__", risk_projection),
                 {"project": project_name},
             ),
         }

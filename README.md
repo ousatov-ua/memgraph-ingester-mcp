@@ -18,13 +18,13 @@ Code graph tools:
 - `code_hot_paths`: compact hot-path candidates from size and call graph metrics.
 - `code_search`: CodeChunk vector search for broad discovery; text is omitted by default.
 - `code_lookup_type`: exact class/interface/annotation lookup; member expansion is opt-in.
-- `code_lookup_methods`: exact method lookup with source ranges.
+- `code_lookup_methods`: exact method lookup with source ranges; `compact=true` keeps range output small.
 - `code_callers`, `code_callees`: compact, paginated call graph lookups.
 - `code_hierarchy`: class ancestry, children, interfaces, and interface implementors.
 
 Memory tools:
 
-- `memory_orientation`: rules plus open findings, tasks, questions, and risks.
+- `memory_orientation`: rules plus open findings, tasks, questions, and risks; `compact=true` omits body fields.
 - `memory_schema`: allowed memory types, upsert fields, controlled values, and CodeRef targets.
 - `memory_search`: MemoryChunk vector search with index-only hit metadata.
 - `memory_get`: canonical memory node plus resolved CodeRefs.
@@ -164,6 +164,8 @@ Add this to Gemini CLI `settings.json`:
 
 Prefer the dedicated tools over `raw_read_cypher`. Use RAG search tools only for broad discovery,
 then follow up with exact lookup tools before making claims or edits. Keep responses compact:
-prefer `code_quality_stats`, `code_hot_paths`, `code_orientation(sections=[...])`, compact
-callers/callees, and `code_lookup_type(include_members=false)`. Use memory write tools for task
-lifecycle changes and CodeRef links so derived MemoryChunks stay refreshable.
+prefer `code_quality_stats`, `code_hot_paths(include_evidence=false)`,
+`code_orientation(sections=[...])`, compact callers/callees, `code_lookup_methods(compact=true)`,
+and `code_lookup_type(include_members=false)`. Use `memory_orientation(compact=true)` for status
+checks and memory write tools for task lifecycle changes and CodeRef links so derived MemoryChunks
+stay refreshable.

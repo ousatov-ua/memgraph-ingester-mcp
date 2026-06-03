@@ -78,10 +78,11 @@ def create_server(
         project: str | None = None,
         skip: int = 0,
         limit: int = 50,
+        compact: bool = False,
     ) -> dict[str, Any]:
         """Find methods by signature fragment and return exact source ranges."""
 
-        return tools.code_lookup_methods(signature_fragment, project, skip, limit)
+        return tools.code_lookup_methods(signature_fragment, project, skip, limit, compact)
 
     @mcp.tool()
     def code_callers(
@@ -135,10 +136,10 @@ def create_server(
         return tools.code_hierarchy(fqn, project)
 
     @mcp.tool()
-    def memory_orientation(project: str | None = None) -> dict[str, Any]:
+    def memory_orientation(project: str | None = None, compact: bool = False) -> dict[str, Any]:
         """Return rules plus open findings, tasks, questions, and risks."""
 
-        return tools.memory_orientation(project)
+        return tools.memory_orientation(project, compact)
 
     @mcp.tool()
     def memory_schema(memory_type: str | None = None) -> dict[str, Any]:
