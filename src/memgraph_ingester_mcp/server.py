@@ -151,11 +151,19 @@ def create_server(
         limit: int = 20,
         include_tests: bool = False,
         include_evidence: bool = True,
+        sections: list[str] | None = None,
         format: str = "json",
     ) -> dict[str, Any]:
         """Return compact hot-path candidates from type size, method size, fan-in, and fan-out."""
 
-        return tools.code_hot_paths(project, limit, include_tests, include_evidence, format)
+        return tools.code_hot_paths(
+            project,
+            limit,
+            include_tests,
+            include_evidence,
+            sections,
+            format,
+        )
 
     @mcp.tool()
     def code_quality_stats(

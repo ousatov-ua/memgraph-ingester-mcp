@@ -35,6 +35,7 @@ CONTROLLED_VALUES: dict[tuple[str, str], frozenset[str]] = {
 }
 
 OUTPUT_FORMATS = frozenset({"json", "table_json"})
+HOT_PATH_SECTIONS = frozenset({"largestTypes", "longestMethods", "fanIn", "fanOut"})
 
 
 def _bounded_limit(limit: int, *, default: int, maximum: int) -> int:
@@ -775,72 +776,96 @@ class MemgraphIngesterTools:
         limit: int = 20,
         include_tests: bool = False,
         include_evidence: bool = True,
+        sections: Sequence[str] | str | None = None,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         bounded_limit = _bounded_limit(limit, default=20, maximum=50)
+        requested_sections = _normalize_sections(
+            sections,
+            allowed=HOT_PATH_SECTIONS,
+            default=HOT_PATH_SECTIONS,
+        )
         params = {
             "project": project_name,
             "limit": bounded_limit,
             "include_tests": include_tests,
         }
-        largest_types = self.client.run(
-            """
-            MATCH (file:File {project: $project})-[:DEFINES]->(type {project: $project})
-            WHERE ($include_tests OR NOT file.path STARTS WITH 'src/test/')
-              AND (type:Class OR type:Interface OR type:Annotation)
-            OPTIONAL MATCH (type)-[:DECLARES]->(method:Method {project: $project})
-            WITH file, type, count(DISTINCT method) AS methods
-            RETURN 'type' AS kind, type.fqn AS id, labels(type)[0] AS label,
-                   methods AS score, file.path AS path, null AS startLine, null AS endLine
-            ORDER BY score DESC, id
-            LIMIT $limit
-            """,
-            params,
+        largest_types = (
+            self.client.run(
+                """
+                MATCH (file:File {project: $project})-[:DEFINES]->(type {project: $project})
+                WHERE ($include_tests OR NOT file.path STARTS WITH 'src/test/')
+                  AND (type:Class OR type:Interface OR type:Annotation)
+                OPTIONAL MATCH (type)-[:DECLARES]->(method:Method {project: $project})
+                WITH file, type, count(DISTINCT method) AS methods
+                RETURN 'type' AS kind, type.fqn AS id, labels(type)[0] AS label,
+                       methods AS score, file.path AS path, null AS startLine, null AS endLine
+                ORDER BY score DESC, id
+                LIMIT $limit
+                """,
+                params,
+            )
+            if "largestTypes" in requested_sections
+            else []
         )
-        longest_methods = self.client.run(
-            """
-            MATCH (file:File {project: $project})-[:DEFINES]->(method:Method {project: $project})
-            WHERE ($include_tests OR NOT file.path STARTS WITH 'src/test/')
-              AND method.startLine IS NOT NULL AND method.endLine IS NOT NULL
-              AND coalesce(method.isSynthetic, false) = false
-            WITH file, method, method.endLine - method.startLine + 1 AS lines
-            RETURN 'method' AS kind, method.signature AS id, method.ownerDisplayName AS label,
-                   lines AS score, file.path AS path,
-                   method.startLine AS startLine, method.endLine AS endLine
-            ORDER BY score DESC, id
-            LIMIT $limit
-            """,
-            params,
+        longest_methods = (
+            self.client.run(
+                """
+                MATCH (file:File {project: $project})
+                  -[:DEFINES]->(method:Method {project: $project})
+                WHERE ($include_tests OR NOT file.path STARTS WITH 'src/test/')
+                  AND method.startLine IS NOT NULL AND method.endLine IS NOT NULL
+                  AND coalesce(method.isSynthetic, false) = false
+                WITH file, method, method.endLine - method.startLine + 1 AS lines
+                RETURN 'method' AS kind, method.signature AS id, method.ownerDisplayName AS label,
+                       lines AS score, file.path AS path,
+                       method.startLine AS startLine, method.endLine AS endLine
+                ORDER BY score DESC, id
+                LIMIT $limit
+                """,
+                params,
+            )
+            if "longestMethods" in requested_sections
+            else []
         )
-        fan_in = self.client.run(
-            """
-            MATCH (caller:Method {project: $project})
-              -[call:CALLS]->(method:Method {project: $project})
-            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
-            WITH method, file, count(call) AS callers
-            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-            RETURN 'fanIn' AS kind, method.signature AS id, method.ownerDisplayName AS label,
-                   callers AS score, file.path AS path,
-                   method.startLine AS startLine, method.endLine AS endLine
-            ORDER BY score DESC, id
-            LIMIT $limit
-            """,
-            params,
+        fan_in = (
+            self.client.run(
+                """
+                MATCH (caller:Method {project: $project})
+                  -[call:CALLS]->(method:Method {project: $project})
+                OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
+                WITH method, file, count(call) AS callers
+                WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
+                RETURN 'fanIn' AS kind, method.signature AS id, method.ownerDisplayName AS label,
+                       callers AS score, file.path AS path,
+                       method.startLine AS startLine, method.endLine AS endLine
+                ORDER BY score DESC, id
+                LIMIT $limit
+                """,
+                params,
+            )
+            if "fanIn" in requested_sections
+            else []
         )
-        fan_out = self.client.run(
-            """
-            MATCH (method:Method {project: $project})-[call:CALLS]->(:Method {project: $project})
-            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
-            WITH method, file, count(call) AS callees
-            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-            RETURN 'fanOut' AS kind, method.signature AS id, method.ownerDisplayName AS label,
-                   callees AS score, file.path AS path,
-                   method.startLine AS startLine, method.endLine AS endLine
-            ORDER BY score DESC, id
-            LIMIT $limit
-            """,
-            params,
+        fan_out = (
+            self.client.run(
+                """
+                MATCH (method:Method {project: $project})
+                  -[call:CALLS]->(:Method {project: $project})
+                OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
+                WITH method, file, count(call) AS callees
+                WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
+                RETURN 'fanOut' AS kind, method.signature AS id, method.ownerDisplayName AS label,
+                       callees AS score, file.path AS path,
+                       method.startLine AS startLine, method.endLine AS endLine
+                ORDER BY score DESC, id
+                LIMIT $limit
+                """,
+                params,
+            )
+            if "fanOut" in requested_sections
+            else []
         )
         rows: list[dict[str, Any]] = []
         for section, section_rows in (
@@ -865,7 +890,14 @@ class MemgraphIngesterTools:
                 },
                 rows,
                 limit=bounded_limit,
-                extra={"includeEvidence": include_evidence},
+                extra={
+                    "includeEvidence": include_evidence,
+                    "sections": [
+                        section
+                        for section in ("largestTypes", "longestMethods", "fanIn", "fanOut")
+                        if section in requested_sections
+                    ],
+                },
             ),
             output_format,
         )

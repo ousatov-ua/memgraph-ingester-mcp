@@ -428,6 +428,28 @@ def test_code_hot_paths_returns_compact_sections():
     }
 
 
+def test_code_hot_paths_can_filter_sections():
+    tools = make_tools()
+
+    result = tools.code_hot_paths(
+        limit=2,
+        include_evidence=False,
+        sections=["fanIn"],
+    )
+
+    assert result["hotPaths"] == [{"ok": True, "section": "fanIn"}]
+    assert result["meta"]["sections"] == ["fanIn"]
+    assert len(tools.client.calls) == 1
+    assert "count(call) AS callers" in tools.client.calls[0]["query"]
+
+
+def test_code_hot_paths_rejects_unknown_sections():
+    tools = make_tools()
+
+    with pytest.raises(MemgraphError, match="Unknown section"):
+        tools.code_hot_paths(sections=["everything"])
+
+
 def test_code_hot_paths_can_return_table_json():
     tools = make_tools()
 
