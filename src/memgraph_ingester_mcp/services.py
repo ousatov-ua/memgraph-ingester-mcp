@@ -458,27 +458,41 @@ class MemgraphIngesterTools:
             {"project": project_name, "type_name": type_name, "fqn": fqn},
         )
         total_count = count_rows[0].get("count", 0) if count_rows else 0
-        type_projection = (
+        member_count_cypher = (
             """
-                   labels(t) AS labels, t.fqn AS fqn, t.name AS name, t.kind AS kind,
-                   collect(DISTINCT file.path) AS files
+            OPTIONAL MATCH (t)-[:DECLARES]->(m_cnt:Method {project: $project})
+            WITH t, files, count(m_cnt) AS methodCount
+            OPTIONAL MATCH (t)-[:DECLARES]->(f_cnt:Field {project: $project})
+            WITH t, files, methodCount, count(f_cnt) AS fieldCount
             """
+            if (member_summary and not include_members)
+            else ""
+        )
+        member_count_cols = (
+            ", methodCount, fieldCount"
+            if (member_summary and not include_members)
+            else ""
+        )
+        extra_type_cols = (
+            ""
             if compact
-            else """
-                   labels(t) AS labels, t.fqn AS fqn, t.name AS name, t.kind AS kind,
-                   t.visibility AS visibility, t.isExternal AS isExternal,
-                   t.language AS language, t.framework AS framework,
-                   t.modulePath AS modulePath, collect(DISTINCT file.path) AS files
-            """
+            else (
+                "t.visibility AS visibility, t.isExternal AS isExternal, "
+                "t.language AS language, t.framework AS framework, "
+                "t.modulePath AS modulePath, "
+            )
         )
         types = self.client.run(
             f"""
             MATCH (t {{project: $project}})
             WHERE (t:Class OR t:Interface OR t:Annotation) AND {predicate}
             OPTIONAL MATCH (file:File {{project: $project}})-[:DEFINES]->(t)
-            RETURN {type_projection.strip()}
-            ORDER BY fqn
+            WITH t, collect(DISTINCT file.path) AS files
+            ORDER BY t.fqn
             LIMIT $limit
+            {member_count_cypher}
+            RETURN labels(t) AS labels, t.fqn AS fqn, t.name AS name, t.kind AS kind,
+                   {extra_type_cols}files{member_count_cols}
             """,
             {
                 "project": project_name,
@@ -487,23 +501,16 @@ class MemgraphIngesterTools:
                 "limit": bounded_limit,
             },
         )
-        if member_summary or include_members:
+        if member_summary and not include_members:
+            for item in types:
+                item["memberCounts"] = {
+                    "methods": item.pop("methodCount", 0),
+                    "fields": item.pop("fieldCount", 0),
+                }
+        if include_members:
             for item in types:
                 item_fqn = item.get("fqn")
-                if member_summary and item_fqn:
-                    summary = self.client.run(
-                        """
-                        MATCH (t {project: $project, fqn: $fqn})
-                        WHERE t:Class OR t:Interface OR t:Annotation
-                        OPTIONAL MATCH (t)-[:DECLARES]->(m:Method {project: $project})
-                        WITH t, count(DISTINCT m) AS methods
-                        OPTIONAL MATCH (t)-[:DECLARES]->(field:Field {project: $project})
-                        RETURN methods AS methods, count(DISTINCT field) AS fields
-                        """,
-                        {"project": project_name, "fqn": item_fqn},
-                    )
-                    item["memberCounts"] = summary[0] if summary else {"methods": 0, "fields": 0}
-                if not include_members or not item_fqn:
+                if not item_fqn:
                     continue
                 method_projection = (
                     """
@@ -672,6 +679,7 @@ class MemgraphIngesterTools:
                     "owner": row.get("callerOwner"),
                     "startLine": row.get("callerStartLine"),
                     "endLine": row.get("callerEndLine"),
+                    "callee": row.get("calleeSignature"),
                     "calleeOwner": row.get("calleeOwner"),
                 }
                 for row in rows

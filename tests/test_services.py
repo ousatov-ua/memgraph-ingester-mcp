@@ -124,9 +124,10 @@ class CodeLookupClient:
                     }
                 )
             row["files"] = ["src/main/java/demo/Foo.java"]
+            if "methodCount" in query:
+                row["methodCount"] = 7
+                row["fieldCount"] = 2
             return [row]
-        if "RETURN methods AS methods" in query:
-            return [{"methods": 7, "fields": 2}]
         if "RETURN m.signature AS signature" in query:
             return [{"signature": "demo.Foo.a()", "name": "a"}]
         if "RETURN field.fqn AS fqn" in query:
@@ -363,6 +364,7 @@ def test_code_callers_are_compact_and_low_limit_by_default():
             "owner": "Foo",
             "startLine": 10,
             "endLine": 20,
+            "callee": "demo.Bar.b()",
             "calleeOwner": "Bar",
         }
     ]
@@ -381,9 +383,10 @@ def test_code_callers_can_return_table_json():
         "owner",
         "startLine",
         "endLine",
+        "callee",
         "calleeOwner",
     ]
-    assert result["callers"]["rows"] == [["demo.Foo.a()", "Foo", 10, 20, "Bar"]]
+    assert result["callers"]["rows"] == [["demo.Foo.a()", "Foo", 10, 20, "demo.Bar.b()", "Bar"]]
     assert result["meta"]["format"] == "table_json"
 
 
@@ -682,8 +685,7 @@ def test_code_lookup_type_orders_by_return_alias_after_collect():
         if "collect(DISTINCT file.path) AS files" in call["query"]
     )
     assert "collect(DISTINCT file.path) AS files" in query
-    assert "ORDER BY fqn" in query
-    assert "ORDER BY t.fqn" not in query
+    assert "ORDER BY t.fqn" in query
 
 
 def test_code_lookup_methods_orders_by_return_alias_after_collect():
