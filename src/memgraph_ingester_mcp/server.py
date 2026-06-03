@@ -48,6 +48,7 @@ def create_server(
         query: str,
         project: str | None = None,
         limit: int = DISCOVERY_LIMIT,
+        include_tests: bool = False,
         include_text: bool = False,
         text_limit: int = 160,
         dedupe_by_source: bool = True,
@@ -56,12 +57,13 @@ def create_server(
         """Search CodeChunk embeddings and return source-linked discovery hits."""
 
         return tools.code_search(
-            query,
-            project,
-            limit,
-            include_text,
-            text_limit,
-            dedupe_by_source,
+            query=query,
+            project=project,
+            limit=limit,
+            include_tests=include_tests,
+            include_text=include_text,
+            text_limit=text_limit,
+            dedupe_by_source=dedupe_by_source,
             output_format=format,
         )
 
@@ -71,6 +73,7 @@ def create_server(
         type_name: str | None = None,
         fqn: str | None = None,
         include_members: bool = False,
+        include_tests: bool = False,
         member_limit: int = MEMBER_LIMIT,
         member_summary: bool = False,
         limit: int = LOOKUP_LIMIT,
@@ -80,14 +83,15 @@ def create_server(
         """Look up classes, interfaces, or annotations by simple name or FQN."""
 
         return tools.code_lookup_type(
-            project,
-            type_name,
-            fqn,
-            include_members,
-            member_limit,
-            member_summary,
-            limit,
-            compact,
+            project=project,
+            type_name=type_name,
+            fqn=fqn,
+            include_members=include_members,
+            include_tests=include_tests,
+            member_limit=member_limit,
+            member_summary=member_summary,
+            limit=limit,
+            compact=compact,
             output_format=format,
         )
 
@@ -97,17 +101,19 @@ def create_server(
         project: str | None = None,
         skip: int = 0,
         limit: int = LOOKUP_LIMIT,
+        include_tests: bool = False,
         compact: bool = True,
         format: str = "table_json",
     ) -> dict[str, Any]:
         """Find methods by signature fragment and return exact source ranges."""
 
         return tools.code_lookup_methods(
-            signature_fragment,
-            project,
-            skip,
-            limit,
-            compact,
+            signature_fragment=signature_fragment,
+            project=project,
+            skip=skip,
+            limit=limit,
+            include_tests=include_tests,
+            compact=compact,
             output_format=format,
         )
 
@@ -117,17 +123,41 @@ def create_server(
         project: str | None = None,
         skip: int = 0,
         limit: int = CALL_GRAPH_LIMIT,
+        include_tests: bool = False,
         compact: bool = True,
         format: str = "table_json",
     ) -> dict[str, Any]:
         """List methods that call matching callee signatures."""
 
         return tools.code_callers(
-            callee_fragment,
-            project,
-            skip,
-            limit,
-            compact,
+            callee_fragment=callee_fragment,
+            project=project,
+            skip=skip,
+            limit=limit,
+            include_tests=include_tests,
+            compact=compact,
+            output_format=format,
+        )
+
+    @mcp.tool()
+    def code_method_context(
+        signature_fragment: str,
+        project: str | None = None,
+        method_limit: int = DISCOVERY_LIMIT,
+        neighbor_limit: int = DISCOVERY_LIMIT,
+        include_tests: bool = False,
+        compact: bool = True,
+        format: str = "table_json",
+    ) -> dict[str, Any]:
+        """Return matching methods plus compact caller and callee context."""
+
+        return tools.code_method_context(
+            signature_fragment=signature_fragment,
+            project=project,
+            method_limit=method_limit,
+            neighbor_limit=neighbor_limit,
+            include_tests=include_tests,
+            compact=compact,
             output_format=format,
         )
 
@@ -137,17 +167,19 @@ def create_server(
         project: str | None = None,
         skip: int = 0,
         limit: int = CALL_GRAPH_LIMIT,
+        include_tests: bool = False,
         compact: bool = True,
         format: str = "table_json",
     ) -> dict[str, Any]:
         """List callees invoked by matching caller signatures."""
 
         return tools.code_callees(
-            caller_fragment,
-            project,
-            skip,
-            limit,
-            compact,
+            caller_fragment=caller_fragment,
+            project=project,
+            skip=skip,
+            limit=limit,
+            include_tests=include_tests,
+            compact=compact,
             output_format=format,
         )
 

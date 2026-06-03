@@ -188,6 +188,18 @@ class CallGraphClient:
     def run(self, query, parameters=None, *, write=False):
         params = dict(parameters or {})
         self.calls.append({"query": query, "parameters": params, "write": write})
+        if "WHERE method.signature CONTAINS $fragment" in query:
+            if "RETURN count(method) AS count" in query:
+                return [{"count": 1}]
+            return [
+                {
+                    "ownerDisplayName": "GraphWriter",
+                    "name": "upsertFile",
+                    "startLine": 10,
+                    "endLine": 20,
+                    "files": ["src/main/java/demo/GraphWriter.java"],
+                }
+            ]
         if "RETURN count(*) AS count" in query:
             return [{"count": 100}]
         if "calleeFile.path AS calleePath" in query:
@@ -394,11 +406,27 @@ def test_registered_code_tool_defaults_are_discovery_sized():
     registered = mcp._tool_manager._tools
 
     assert registered["code_search"].parameters["properties"]["limit"]["default"] == 5
+    assert registered["code_search"].parameters["properties"]["include_tests"]["default"] is False
     assert registered["code_lookup_type"].parameters["properties"]["limit"]["default"] == 10
+    assert (
+        registered["code_lookup_type"].parameters["properties"]["include_tests"]["default"] is False
+    )
     assert registered["code_lookup_type"].parameters["properties"]["member_limit"]["default"] == 25
     assert registered["code_lookup_methods"].parameters["properties"]["limit"]["default"] == 10
+    assert (
+        registered["code_lookup_methods"].parameters["properties"]["include_tests"]["default"]
+        is False
+    )
     assert registered["code_callers"].parameters["properties"]["limit"]["default"] == 10
+    assert registered["code_callers"].parameters["properties"]["include_tests"]["default"] is False
     assert registered["code_callees"].parameters["properties"]["limit"]["default"] == 10
+    assert registered["code_callees"].parameters["properties"]["include_tests"]["default"] is False
+    context_defaults = registered["code_method_context"].parameters["properties"]
+    assert context_defaults["method_limit"]["default"] == 5
+    assert context_defaults["include_tests"]["default"] is False
+    assert (
+        context_defaults["neighbor_limit"]["default"] == 5
+    )
     assert registered["code_hot_paths"].parameters["properties"]["limit"]["default"] == 5
     assert registered["code_quality_stats"].parameters["properties"]["limit"]["default"] == 5
     quality_defaults = registered["code_quality_stats"].parameters["properties"]
@@ -504,6 +532,40 @@ def test_code_callees_compact_can_return_table_json():
     assert result["callees"]["rows"] == [
         ["Foo", "a", "Bar", "b", "src/main/java/demo/Bar.java", 30, 40]
     ]
+    assert result["meta"]["format"] == "table_json"
+
+
+def test_code_method_context_bundles_methods_callers_and_callees():
+    client = CallGraphClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_method_context("upsertFile", output_format="table_json")
+
+    assert result["methods"]["cols"] == ["owner", "name", "path", "startLine", "endLine"]
+    assert result["methods"]["rows"] == [
+        ["GraphWriter", "upsertFile", "src/main/java/demo/GraphWriter.java", 10, 20]
+    ]
+    assert result["callers"]["cols"] == [
+        "owner",
+        "name",
+        "path",
+        "startLine",
+        "endLine",
+        "calleeOwner",
+        "calleeName",
+    ]
+    assert result["callees"]["cols"] == [
+        "callerOwner",
+        "callerName",
+        "owner",
+        "name",
+        "path",
+        "startLine",
+        "endLine",
+    ]
+    assert result["meta"]["methods"]["limit"] == 5
+    assert result["meta"]["callers"]["limit"] == 5
+    assert result["meta"]["callees"]["limit"] == 5
     assert result["meta"]["format"] == "table_json"
 
 

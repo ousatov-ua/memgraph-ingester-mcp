@@ -391,6 +391,7 @@ class MemgraphIngesterTools:
         query: str,
         project: str | None = None,
         limit: int = DISCOVERY_LIMIT,
+        include_tests: bool = False,
         include_text: bool = False,
         text_limit: int = 160,
         dedupe_by_source: bool = True,
@@ -429,13 +430,19 @@ class MemgraphIngesterTools:
             YIELD node AS chunk, similarity
             WITH chunk, similarity
             WHERE chunk.project = $project
+              AND ($include_tests OR chunk.path IS NULL OR NOT chunk.path STARTS WITH 'src/test/')
             MATCH (source {project: $project})-[:HAS_RAG_CHUNK]->(chunk)
             RETURN __RETURN_PROJECTION__
             ORDER BY similarity DESC
             """.replace("__RETURN_PROJECTION__", return_projection.strip())
         rows = self.client.run(
             search_query,
-            {"project": project_name, "query": query, "limit": fetch_limit},
+            {
+                "project": project_name,
+                "query": query,
+                "limit": fetch_limit,
+                "include_tests": include_tests,
+            },
         )
         if dedupe_by_source:
             deduped: list[dict[str, Any]] = []
@@ -471,6 +478,7 @@ class MemgraphIngesterTools:
         type_name: str | None = None,
         fqn: str | None = None,
         include_members: bool = False,
+        include_tests: bool = False,
         member_limit: int = MEMBER_LIMIT,
         member_summary: bool = False,
         limit: int = LOOKUP_LIMIT,
@@ -487,9 +495,17 @@ class MemgraphIngesterTools:
             f"""
             MATCH (t {{project: $project}})
             WHERE (t:Class OR t:Interface OR t:Annotation) AND {predicate}
-            RETURN count(t) AS count
+            OPTIONAL MATCH (file:File {{project: $project}})-[:DEFINES]->(t)
+            WITH t, file
+            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
+            RETURN count(DISTINCT t) AS count
             """,
-            {"project": project_name, "type_name": type_name, "fqn": fqn},
+            {
+                "project": project_name,
+                "type_name": type_name,
+                "fqn": fqn,
+                "include_tests": include_tests,
+            },
         )
         total_count = count_rows[0].get("count", 0) if count_rows else 0
         member_count_cypher = (
@@ -521,6 +537,8 @@ class MemgraphIngesterTools:
             MATCH (t {{project: $project}})
             WHERE (t:Class OR t:Interface OR t:Annotation) AND {predicate}
             OPTIONAL MATCH (file:File {{project: $project}})-[:DEFINES]->(t)
+            WITH t, file
+            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
             WITH t, collect(DISTINCT file.path) AS files
             ORDER BY t.fqn
             LIMIT $limit
@@ -533,6 +551,7 @@ class MemgraphIngesterTools:
                 "type_name": type_name,
                 "fqn": fqn,
                 "limit": bounded_limit,
+                "include_tests": include_tests,
             },
         )
         if member_summary and not include_members:
@@ -604,6 +623,7 @@ class MemgraphIngesterTools:
         project: str | None = None,
         skip: int = 0,
         limit: int = LOOKUP_LIMIT,
+        include_tests: bool = False,
         compact: bool = True,
         output_format: str = "json",
     ) -> dict[str, Any]:
@@ -612,8 +632,7 @@ class MemgraphIngesterTools:
             """
                    method.name AS name, method.ownerDisplayName AS ownerDisplayName,
                    method.startLine AS startLine, method.endLine AS endLine,
-                   collect(DISTINCT file.path) AS files,
-                   method.signature AS sortSignature
+                   files, method.signature AS sortSignature
             """
             if compact
             else """
@@ -621,8 +640,7 @@ class MemgraphIngesterTools:
                    method.ownerFqn AS ownerFqn, method.ownerDisplayName AS ownerDisplayName,
                    method.returnType AS returnType, method.visibility AS visibility,
                    method.startLine AS startLine, method.endLine AS endLine,
-                   method.isStatic AS isStatic, method.isSynthetic AS isSynthetic,
-                   collect(DISTINCT file.path) AS files
+                   method.isStatic AS isStatic, method.isSynthetic AS isSynthetic, files
             """
         )
         rows = self.client.run(
@@ -630,6 +648,9 @@ class MemgraphIngesterTools:
             MATCH (method:Method {project: $project})
             WHERE method.signature CONTAINS $fragment
             OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
+            WITH method, file
+            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
+            WITH method, collect(DISTINCT file.path) AS files
             RETURN __RETURN_PROJECTION__
             ORDER BY __ORDER_BY__
             SKIP $skip
@@ -642,6 +663,7 @@ class MemgraphIngesterTools:
                 "fragment": signature_fragment,
                 "skip": _bounded_skip(skip),
                 "limit": _bounded_limit(limit, default=LOOKUP_LIMIT, maximum=200),
+                "include_tests": include_tests,
             },
         )
         if compact:
@@ -659,9 +681,16 @@ class MemgraphIngesterTools:
             """
             MATCH (method:Method {project: $project})
             WHERE method.signature CONTAINS $fragment
-            RETURN count(method) AS count
+            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
+            WITH method, file
+            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
+            RETURN count(DISTINCT method) AS count
             """,
-            {"project": project_name, "fragment": signature_fragment},
+            {
+                "project": project_name,
+                "fragment": signature_fragment,
+                "include_tests": include_tests,
+            },
         )
         total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
         skip_value = _bounded_skip(skip)
@@ -683,6 +712,7 @@ class MemgraphIngesterTools:
         project: str | None = None,
         skip: int = 0,
         limit: int = CALL_GRAPH_LIMIT,
+        include_tests: bool = False,
         compact: bool = True,
         output_format: str = "json",
     ) -> dict[str, Any]:
@@ -694,6 +724,11 @@ class MemgraphIngesterTools:
             MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
             WHERE callee.signature CONTAINS $fragment
             OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
+            OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
+            WITH caller, callee, callerFile, calleeFile
+            WHERE $include_tests
+               OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
+               AND (calleeFile.path IS NULL OR NOT calleeFile.path STARTS WITH 'src/test/'))
             RETURN caller.signature AS callerSignature,
                    caller.name AS callerName,
                    caller.ownerDisplayName AS callerOwner,
@@ -712,15 +747,26 @@ class MemgraphIngesterTools:
                 "fragment": callee_fragment,
                 "skip": skip_value,
                 "limit": limit_value,
+                "include_tests": include_tests,
             },
         )
         count_rows = self.client.run(
             """
             MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
             WHERE callee.signature CONTAINS $fragment
+            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
+            OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
+            WITH caller, callee, callerFile, calleeFile
+            WHERE $include_tests
+               OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
+               AND (calleeFile.path IS NULL OR NOT calleeFile.path STARTS WITH 'src/test/'))
             RETURN count(*) AS count
             """,
-            {"project": project_name, "fragment": callee_fragment},
+            {
+                "project": project_name,
+                "fragment": callee_fragment,
+                "include_tests": include_tests,
+            },
         )
         total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
         if compact:
@@ -747,12 +793,67 @@ class MemgraphIngesterTools:
             output_format,
         )
 
+    def code_method_context(
+        self,
+        signature_fragment: str,
+        project: str | None = None,
+        method_limit: int = DISCOVERY_LIMIT,
+        neighbor_limit: int = DISCOVERY_LIMIT,
+        include_tests: bool = False,
+        compact: bool = True,
+        output_format: str = "json",
+    ) -> dict[str, Any]:
+        project_name = self.resolve_project(project)
+        methods = self.code_lookup_methods(
+            signature_fragment,
+            project_name,
+            skip=0,
+            limit=method_limit,
+            include_tests=include_tests,
+            compact=compact,
+            output_format="json",
+        )
+        callers = self.code_callers(
+            signature_fragment,
+            project_name,
+            skip=0,
+            limit=neighbor_limit,
+            include_tests=include_tests,
+            compact=compact,
+            output_format="json",
+        )
+        callees = self.code_callees(
+            signature_fragment,
+            project_name,
+            skip=0,
+            limit=neighbor_limit,
+            include_tests=include_tests,
+            compact=compact,
+            output_format="json",
+        )
+        return _format_response(
+            {
+                "project": project_name,
+                "fragment": signature_fragment,
+                "methods": methods["methods"],
+                "callers": callers["callers"],
+                "callees": callees["callees"],
+                "meta": {
+                    "methods": methods["meta"],
+                    "callers": callers["meta"],
+                    "callees": callees["meta"],
+                },
+            },
+            output_format,
+        )
+
     def code_callees(
         self,
         caller_fragment: str,
         project: str | None = None,
         skip: int = 0,
         limit: int = CALL_GRAPH_LIMIT,
+        include_tests: bool = False,
         compact: bool = True,
         output_format: str = "json",
     ) -> dict[str, Any]:
@@ -764,6 +865,11 @@ class MemgraphIngesterTools:
             MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
             WHERE caller.signature CONTAINS $fragment
             OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
+            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
+            WITH caller, callee, callerFile, calleeFile
+            WHERE $include_tests
+               OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
+               AND (calleeFile.path IS NULL OR NOT calleeFile.path STARTS WITH 'src/test/'))
             RETURN caller.signature AS callerSignature,
                    caller.name AS callerName,
                    caller.ownerDisplayName AS callerOwner,
@@ -782,15 +888,26 @@ class MemgraphIngesterTools:
                 "fragment": caller_fragment,
                 "skip": skip_value,
                 "limit": limit_value,
+                "include_tests": include_tests,
             },
         )
         count_rows = self.client.run(
             """
             MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
             WHERE caller.signature CONTAINS $fragment
+            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
+            OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
+            WITH caller, callee, callerFile, calleeFile
+            WHERE $include_tests
+               OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
+               AND (calleeFile.path IS NULL OR NOT calleeFile.path STARTS WITH 'src/test/'))
             RETURN count(*) AS count
             """,
-            {"project": project_name, "fragment": caller_fragment},
+            {
+                "project": project_name,
+                "fragment": caller_fragment,
+                "include_tests": include_tests,
+            },
         )
         total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
         if compact:
