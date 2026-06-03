@@ -2,6 +2,7 @@ import pytest
 
 from memgraph_ingester_mcp.config import MemgraphConfig
 from memgraph_ingester_mcp.db import MemgraphError
+from memgraph_ingester_mcp.server import create_server
 from memgraph_ingester_mcp.services import MemgraphIngesterTools
 
 
@@ -90,6 +91,19 @@ class FakeClient:
                 }
             ]
 
+        if "WHERE method.signature CONTAINS $fragment" in query:
+            if "RETURN count(method) AS count" in query:
+                return [{"count": 1}]
+            return [
+                {
+                    "ownerDisplayName": "GraphWriter",
+                    "name": "upsertFile",
+                    "startLine": 10,
+                    "endLine": 20,
+                    "files": ["src/main/java/demo/GraphWriter.java"],
+                }
+            ]
+
         return [{"ok": True}]
 
 
@@ -143,21 +157,25 @@ class SearchClient:
         self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
         return [
             {
-                "sourceType": ["Method"],
+                "kind": "Method",
                 "sourceId": "demo.Foo.a()",
+                "owner": "Foo",
+                "name": "a",
                 "path": "src/main/java/demo/Foo.java",
-                "ownerFqn": "demo.Foo",
-                "signature": "demo.Foo.a()",
-                "similarity": 0.9,
+                "startLine": 10,
+                "endLine": 20,
+                "score": 0.9,
                 "text": "x" * 500,
             },
             {
-                "sourceType": ["Method"],
+                "kind": "Method",
                 "sourceId": "demo.Foo.a()",
+                "owner": "Foo",
+                "name": "a",
                 "path": "src/main/java/demo/Foo.java",
-                "ownerFqn": "demo.Foo",
-                "signature": "demo.Foo.a()",
-                "similarity": 0.8,
+                "startLine": 10,
+                "endLine": 20,
+                "score": 0.8,
                 "text": "duplicate",
             },
         ]
@@ -176,8 +194,10 @@ class CallGraphClient:
             return [
                 {
                     "callerSignature": "demo.Foo.a()",
+                    "callerName": "a",
                     "callerOwner": "Foo",
                     "calleeSignature": "demo.Bar.b()",
+                    "calleeName": "b",
                     "calleeOwner": "Bar",
                     "calleeStartLine": 30,
                     "calleeEndLine": 40,
@@ -187,10 +207,12 @@ class CallGraphClient:
         return [
             {
                 "callerSignature": "demo.Foo.a()",
+                "callerName": "a",
                 "callerOwner": "Foo",
                 "callerStartLine": 10,
                 "callerEndLine": 20,
                 "calleeSignature": "demo.Bar.b()",
+                "calleeName": "b",
                 "calleeOwner": "Bar",
                 "callerPath": "src/main/java/demo/Foo.java",
             }
@@ -213,10 +235,23 @@ def test_code_lookup_type_is_compact_by_default():
     result = tools.code_lookup_type(type_name="Foo")
 
     item = result["types"][0]
-    assert item["memberCounts"] == {"methods": 7, "fields": 2}
+    assert "memberCounts" not in item
+    assert "visibility" not in item
+    assert "isExternal" not in item
     assert "methods" not in item
     assert "fields" not in item
+    assert all("methodCount" not in call["query"] for call in client.calls)
     assert all("ORDER BY m.name" not in call["query"] for call in client.calls)
+
+
+def test_code_lookup_type_member_summary_is_opt_in():
+    client = CodeLookupClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_lookup_type(type_name="Foo", member_summary=True)
+
+    assert result["types"][0]["memberCounts"] == {"methods": 7, "fields": 2}
+    assert any("methodCount" in call["query"] for call in client.calls)
 
 
 def test_code_lookup_type_expands_members_only_when_requested():
@@ -244,13 +279,7 @@ def test_code_lookup_type_can_return_table_json():
         "fqn",
         "name",
         "kind",
-        "visibility",
-        "isExternal",
-        "language",
-        "framework",
-        "modulePath",
         "files",
-        "memberCounts",
     ]
     assert result["types"]["rows"] == [
         [
@@ -258,13 +287,7 @@ def test_code_lookup_type_can_return_table_json():
             "demo.Foo",
             "Foo",
             "class",
-            "public",
-            False,
-            "java",
-            "",
-            "",
             ["src/main/java/demo/Foo.java"],
-            {"methods": 7, "fields": 2},
         ]
     ]
     assert result["meta"]["format"] == "table_json"
@@ -337,20 +360,22 @@ def test_code_search_can_return_table_json():
     result = tools.code_search("hot path", output_format="table_json")
 
     assert result["hits"]["cols"] == [
-        "sourceType",
-        "sourceId",
+        "kind",
+        "owner",
+        "name",
         "path",
-        "ownerFqn",
-        "signature",
-        "similarity",
+        "startLine",
+        "endLine",
+        "score",
     ]
     assert result["hits"]["rows"] == [
         [
-            ["Method"],
-            "demo.Foo.a()",
+            "Method",
+            "Foo",
+            "a",
             "src/main/java/demo/Foo.java",
-            "demo.Foo",
-            "demo.Foo.a()",
+            10,
+            20,
             0.9,
         ]
     ]
@@ -364,22 +389,38 @@ def test_table_json_rejects_unknown_format():
         tools.code_hot_paths(output_format="yaml")
 
 
+def test_registered_code_tool_defaults_are_discovery_sized():
+    mcp = create_server(MemgraphConfig(default_project="demo"), client=FakeClient())
+    registered = mcp._tool_manager._tools
+
+    assert registered["code_search"].parameters["properties"]["limit"]["default"] == 5
+    assert registered["code_lookup_type"].parameters["properties"]["limit"]["default"] == 10
+    assert registered["code_lookup_type"].parameters["properties"]["member_limit"]["default"] == 25
+    assert registered["code_lookup_methods"].parameters["properties"]["limit"]["default"] == 10
+    assert registered["code_callers"].parameters["properties"]["limit"]["default"] == 10
+    assert registered["code_callees"].parameters["properties"]["limit"]["default"] == 10
+    assert registered["code_hot_paths"].parameters["properties"]["limit"]["default"] == 5
+    assert registered["code_quality_stats"].parameters["properties"]["limit"]["default"] == 5
+    quality_defaults = registered["code_quality_stats"].parameters["properties"]
+    assert quality_defaults["include_tests"]["default"] is False
+
+
 def test_code_callers_are_compact_and_low_limit_by_default():
     client = CallGraphClient()
     tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
 
     result = tools.code_callers("demo.Bar.b")
 
-    assert client.calls[0]["parameters"]["limit"] == 25
+    assert client.calls[0]["parameters"]["limit"] == 10
     assert result["callers"] == [
         {
-            "caller": "demo.Foo.a()",
             "owner": "Foo",
+            "name": "a",
             "path": "src/main/java/demo/Foo.java",
             "startLine": 10,
             "endLine": 20,
-            "callee": "demo.Bar.b()",
             "calleeOwner": "Bar",
+            "calleeName": "b",
         }
     ]
     assert result["meta"]["totalCount"] == 100
@@ -393,23 +434,23 @@ def test_code_callers_can_return_table_json():
     result = tools.code_callers("demo.Bar.b", output_format="table_json")
 
     assert result["callers"]["cols"] == [
-        "caller",
         "owner",
+        "name",
         "path",
         "startLine",
         "endLine",
-        "callee",
         "calleeOwner",
+        "calleeName",
     ]
     assert result["callers"]["rows"] == [
         [
-            "demo.Foo.a()",
             "Foo",
+            "a",
             "src/main/java/demo/Foo.java",
             10,
             20,
-            "demo.Bar.b()",
             "Bar",
+            "b",
         ]
     ]
     assert result["meta"]["format"] == "table_json"
@@ -435,8 +476,9 @@ def test_code_callees_compact_includes_path():
     assert result["callees"] == [
         {
             "callerOwner": "Foo",
-            "callee": "demo.Bar.b()",
+            "callerName": "a",
             "owner": "Bar",
+            "name": "b",
             "path": "src/main/java/demo/Bar.java",
             "startLine": 30,
             "endLine": 40,
@@ -452,14 +494,15 @@ def test_code_callees_compact_can_return_table_json():
 
     assert result["callees"]["cols"] == [
         "callerOwner",
-        "callee",
+        "callerName",
         "owner",
+        "name",
         "path",
         "startLine",
         "endLine",
     ]
     assert result["callees"]["rows"] == [
-        ["Foo", "demo.Bar.b()", "Bar", "src/main/java/demo/Bar.java", 30, 40]
+        ["Foo", "a", "Bar", "b", "src/main/java/demo/Bar.java", 30, 40]
     ]
     assert result["meta"]["format"] == "table_json"
 
@@ -759,7 +802,7 @@ def test_code_lookup_methods_orders_by_return_alias_after_collect():
 
     query = tools.client.calls[0]["query"]
     assert "collect(DISTINCT file.path) AS files" in query
-    assert "ORDER BY signature" in query
+    assert "ORDER BY sortSignature" in query
     assert "ORDER BY method.signature" not in query
 
 
@@ -779,7 +822,10 @@ def test_code_lookup_methods_can_return_table_json():
 
     result = tools.code_lookup_methods("GraphWriter", compact=True, output_format="table_json")
 
-    assert result["methods"] == {"cols": ["ok"], "rows": [[True]]}
+    assert result["methods"] == {
+        "cols": ["owner", "name", "path", "startLine", "endLine"],
+        "rows": [["GraphWriter", "upsertFile", "src/main/java/demo/GraphWriter.java", 10, 20]],
+    }
     assert result["meta"]["format"] == "table_json"
 
 

@@ -14,12 +14,12 @@ Code graph tools:
 
 - `server_status`: graph inventory, memory counts, and vector index status.
 - `code_orientation`: compact package/type/call overview; pass `sections` to keep it focused.
-- `code_quality_stats`: graph-wide code quality and quantity metrics.
-- `code_hot_paths`: compact hot-path candidates from size and call graph metrics.
-- `code_search`: CodeChunk vector search for broad discovery; text is omitted by default.
+- `code_quality_stats`: graph-wide code quality and quantity metrics; defaults to non-test code and a 5-row first page.
+- `code_hot_paths`: compact hot-path candidates from size and call graph metrics; defaults to 5 owner/name rows per selected section.
+- `code_search`: CodeChunk vector search for broad discovery; defaults to 5 deduped range-first hits and omits text.
 - `code_lookup_type`: exact class/interface/annotation lookup; member expansion is opt-in.
-- `code_lookup_methods`: exact method lookup with source ranges; `compact=true` keeps range output small.
-- `code_callers`, `code_callees`: compact, paginated call graph lookups.
+- `code_lookup_methods`: exact method lookup with source ranges; defaults to 10 compact owner/name/path rows.
+- `code_callers`, `code_callees`: compact, paginated range-first call graph lookups; default first page is 10 rows.
 - `code_hierarchy`: class ancestry, children, interfaces, and interface implementors.
 
 Memory tools:
@@ -163,9 +163,10 @@ Add this to Gemini CLI `settings.json`:
 ## Agent Guidance
 
 Prefer the dedicated tools over `raw_read_cypher`. Use RAG search tools only for broad discovery,
-then follow up with exact lookup tools before making claims or edits. Keep responses compact:
-prefer `code_quality_stats`, `code_hot_paths(include_evidence=false)`,
-`code_orientation(sections=[...])`, compact callers/callees, `code_lookup_methods(compact=true)`,
-and `code_lookup_type(include_members=false)`. Use `memory_orientation(compact=true)` for status
-checks and memory write tools for task lifecycle changes and CodeRef links so derived MemoryChunks
-stay refreshable.
+then follow up with exact lookup tools before making claims or edits. The default first pages are
+small on purpose: use `meta.hasMore` and `meta.nextSkip` to paginate instead of raising limits
+preemptively. For performance work, start with `code_hot_paths`; add `code_quality_stats` only when
+you need graph-wide baselines. Compact method/search/call-graph rows are range-first and omit full
+signatures; request non-compact output only when signatures or modifiers are needed. Use
+`memory_orientation(compact=true)` for status checks and memory write tools for task lifecycle
+changes and CodeRef links so derived MemoryChunks stay refreshable.

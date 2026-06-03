@@ -8,7 +8,13 @@ from mcp.server.fastmcp import FastMCP
 
 from memgraph_ingester_mcp.config import MemgraphConfig
 from memgraph_ingester_mcp.db import MemgraphClient
-from memgraph_ingester_mcp.services import MemgraphIngesterTools
+from memgraph_ingester_mcp.services import (
+    CALL_GRAPH_LIMIT,
+    DISCOVERY_LIMIT,
+    LOOKUP_LIMIT,
+    MEMBER_LIMIT,
+    MemgraphIngesterTools,
+)
 
 
 def create_server(
@@ -41,7 +47,7 @@ def create_server(
     def code_search(
         query: str,
         project: str | None = None,
-        limit: int = 10,
+        limit: int = DISCOVERY_LIMIT,
         include_text: bool = False,
         text_limit: int = 160,
         dedupe_by_source: bool = True,
@@ -65,9 +71,9 @@ def create_server(
         type_name: str | None = None,
         fqn: str | None = None,
         include_members: bool = False,
-        member_limit: int = 50,
+        member_limit: int = MEMBER_LIMIT,
         member_summary: bool = False,
-        limit: int = 20,
+        limit: int = LOOKUP_LIMIT,
         compact: bool = True,
         format: str = "table_json",
     ) -> dict[str, Any]:
@@ -90,7 +96,7 @@ def create_server(
         signature_fragment: str,
         project: str | None = None,
         skip: int = 0,
-        limit: int = 50,
+        limit: int = LOOKUP_LIMIT,
         compact: bool = True,
         format: str = "table_json",
     ) -> dict[str, Any]:
@@ -110,7 +116,7 @@ def create_server(
         callee_fragment: str,
         project: str | None = None,
         skip: int = 0,
-        limit: int = 25,
+        limit: int = CALL_GRAPH_LIMIT,
         compact: bool = True,
         format: str = "table_json",
     ) -> dict[str, Any]:
@@ -130,7 +136,7 @@ def create_server(
         caller_fragment: str,
         project: str | None = None,
         skip: int = 0,
-        limit: int = 25,
+        limit: int = CALL_GRAPH_LIMIT,
         compact: bool = True,
         format: str = "table_json",
     ) -> dict[str, Any]:
@@ -148,7 +154,7 @@ def create_server(
     @mcp.tool()
     def code_hot_paths(
         project: str | None = None,
-        limit: int = 20,
+        limit: int = DISCOVERY_LIMIT,
         include_tests: bool = False,
         include_evidence: bool = False,
         sections: list[str] | None = None,
@@ -168,8 +174,8 @@ def create_server(
     @mcp.tool()
     def code_quality_stats(
         project: str | None = None,
-        include_tests: bool = True,
-        limit: int = 20,
+        include_tests: bool = False,
+        limit: int = DISCOVERY_LIMIT,
         format: str = "table_json",
     ) -> dict[str, Any]:
         """Return compact graph-wide code quality and quantity metrics."""

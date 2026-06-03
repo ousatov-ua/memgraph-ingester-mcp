@@ -35,6 +35,10 @@ CONTROLLED_VALUES: dict[tuple[str, str], frozenset[str]] = {
 
 OUTPUT_FORMATS = frozenset({"json", "table_json"})
 HOT_PATH_SECTIONS = frozenset({"largestTypes", "longestMethods", "fanIn", "fanOut"})
+DISCOVERY_LIMIT = 5
+LOOKUP_LIMIT = 10
+CALL_GRAPH_LIMIT = 10
+MEMBER_LIMIT = 25
 
 
 def _bounded_limit(limit: int, *, default: int, maximum: int) -> int:
@@ -57,6 +61,26 @@ def _bounded_text_limit(limit: int) -> int:
     if limit <= 0:
         return 0
     return min(limit, 2_000)
+
+
+def _first(value: Any) -> Any:
+    if isinstance(value, Sequence) and not isinstance(value, str):
+        return value[0] if value else None
+    return value
+
+
+def _method_name(signature: str | None) -> str | None:
+    if not signature:
+        return None
+    return signature.rsplit(".", 1)[-1].split("(", 1)[0]
+
+
+def _compact_owner(owner: str | None, name: str | None) -> str | None:
+    if not owner or not name:
+        return owner
+    if owner == name or owner.endswith(f".{name}") or owner.endswith(f"#{name}"):
+        return None
+    return owner
 
 
 def _normalize_output_format(output_format: str | None) -> str:
@@ -366,27 +390,36 @@ class MemgraphIngesterTools:
         self,
         query: str,
         project: str | None = None,
-        limit: int = 10,
+        limit: int = DISCOVERY_LIMIT,
         include_text: bool = False,
         text_limit: int = 160,
         dedupe_by_source: bool = True,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
-        bounded_limit = _bounded_limit(limit, default=10, maximum=25)
+        bounded_limit = _bounded_limit(limit, default=DISCOVERY_LIMIT, maximum=25)
         bounded_text_limit = _bounded_text_limit(text_limit)
         fetch_limit = min(bounded_limit * 3, 75) if dedupe_by_source else bounded_limit
         return_projection = (
             """
-                   labels(source) AS sourceType, chunk.sourceId AS sourceId,
-                   chunk.path AS path, chunk.ownerFqn AS ownerFqn, chunk.signature AS signature,
-                   similarity, chunk.text AS text
+                   coalesce(chunk.sourceLabel, labels(source)[0]) AS kind,
+                   chunk.sourceId AS sourceId,
+                   coalesce(source.ownerDisplayName, source.ownerFqn, chunk.ownerFqn) AS owner,
+                   coalesce(source.name, chunk.signature, chunk.sourceId) AS name,
+                   chunk.path AS path,
+                   source.startLine AS startLine, source.endLine AS endLine,
+                   round(similarity * 10000) / 10000 AS score,
+                   chunk.text AS text
             """
             if include_text
             else """
-                   labels(source) AS sourceType, chunk.sourceId AS sourceId,
-                   chunk.path AS path, chunk.ownerFqn AS ownerFqn, chunk.signature AS signature,
-                   similarity
+                   coalesce(chunk.sourceLabel, labels(source)[0]) AS kind,
+                   chunk.sourceId AS sourceId,
+                   coalesce(source.ownerDisplayName, source.ownerFqn, chunk.ownerFqn) AS owner,
+                   coalesce(source.name, chunk.signature, chunk.sourceId) AS name,
+                   chunk.path AS path,
+                   source.startLine AS startLine, source.endLine AS endLine,
+                   round(similarity * 10000) / 10000 AS score
             """
         )
         search_query = """
@@ -408,8 +441,7 @@ class MemgraphIngesterTools:
             deduped: list[dict[str, Any]] = []
             seen: set[tuple[str, str]] = set()
             for row in rows:
-                source_type = ",".join(row.get("sourceType") or [])
-                key = (source_type, row.get("sourceId") or "")
+                key = (row.get("kind") or "", row.get("sourceId") or "")
                 if key in seen:
                     continue
                 seen.add(key)
@@ -422,6 +454,8 @@ class MemgraphIngesterTools:
                 row["text"] = _compact_text(row.get("text"), bounded_text_limit)
             else:
                 row.pop("text", None)
+            row.pop("sourceId", None)
+            row["owner"] = _compact_owner(row.get("owner"), row.get("name"))
         return _format_response(
             _with_result_meta(
                 {"project": project_name, "query": query, "hits": rows},
@@ -437,17 +471,17 @@ class MemgraphIngesterTools:
         type_name: str | None = None,
         fqn: str | None = None,
         include_members: bool = False,
-        member_limit: int = 50,
-        member_summary: bool = True,
-        limit: int = 20,
-        compact: bool = False,
+        member_limit: int = MEMBER_LIMIT,
+        member_summary: bool = False,
+        limit: int = LOOKUP_LIMIT,
+        compact: bool = True,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         if not type_name and not fqn:
             raise MemgraphError("Provide either type_name or fqn.")
-        bounded_limit = _bounded_limit(limit, default=20, maximum=100)
-        bounded_member_limit = _bounded_limit(member_limit, default=50, maximum=200)
+        bounded_limit = _bounded_limit(limit, default=LOOKUP_LIMIT, maximum=100)
+        bounded_member_limit = _bounded_limit(member_limit, default=MEMBER_LIMIT, maximum=200)
         predicate = "t.fqn = $fqn" if fqn else "t.name = $type_name"
         count_rows = self.client.run(
             f"""
@@ -569,17 +603,17 @@ class MemgraphIngesterTools:
         signature_fragment: str,
         project: str | None = None,
         skip: int = 0,
-        limit: int = 10,
-        compact: bool = False,
+        limit: int = LOOKUP_LIMIT,
+        compact: bool = True,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         return_projection = (
             """
-                   method.signature AS signature,
-                   method.ownerFqn AS ownerFqn, method.ownerDisplayName AS ownerDisplayName,
+                   method.name AS name, method.ownerDisplayName AS ownerDisplayName,
                    method.startLine AS startLine, method.endLine AS endLine,
-                   collect(DISTINCT file.path) AS files
+                   collect(DISTINCT file.path) AS files,
+                   method.signature AS sortSignature
             """
             if compact
             else """
@@ -597,17 +631,30 @@ class MemgraphIngesterTools:
             WHERE method.signature CONTAINS $fragment
             OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
             RETURN __RETURN_PROJECTION__
-            ORDER BY signature
+            ORDER BY __ORDER_BY__
             SKIP $skip
             LIMIT $limit
-            """.replace("__RETURN_PROJECTION__", return_projection.strip()),
+            """
+            .replace("__RETURN_PROJECTION__", return_projection.strip())
+            .replace("__ORDER_BY__", "sortSignature" if compact else "signature"),
             {
                 "project": project_name,
                 "fragment": signature_fragment,
                 "skip": _bounded_skip(skip),
-                "limit": _bounded_limit(limit, default=10, maximum=200),
+                "limit": _bounded_limit(limit, default=LOOKUP_LIMIT, maximum=200),
             },
         )
+        if compact:
+            rows = [
+                {
+                    "owner": row.get("ownerDisplayName"),
+                    "name": row.get("name") or _method_name(row.get("signature")),
+                    "path": _first(row.get("files")),
+                    "startLine": row.get("startLine"),
+                    "endLine": row.get("endLine"),
+                }
+                for row in rows
+            ]
         count_rows = self.client.run(
             """
             MATCH (method:Method {project: $project})
@@ -618,7 +665,7 @@ class MemgraphIngesterTools:
         )
         total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
         skip_value = _bounded_skip(skip)
-        limit_value = _bounded_limit(limit, default=10, maximum=200)
+        limit_value = _bounded_limit(limit, default=LOOKUP_LIMIT, maximum=200)
         return _format_response(
             _with_result_meta(
                 {"project": project_name, "methods": rows},
@@ -635,23 +682,25 @@ class MemgraphIngesterTools:
         callee_fragment: str,
         project: str | None = None,
         skip: int = 0,
-        limit: int = 25,
+        limit: int = CALL_GRAPH_LIMIT,
         compact: bool = True,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         skip_value = _bounded_skip(skip)
-        limit_value = _bounded_limit(limit, default=25, maximum=100)
+        limit_value = _bounded_limit(limit, default=CALL_GRAPH_LIMIT, maximum=100)
         rows = self.client.run(
             """
             MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
             WHERE callee.signature CONTAINS $fragment
             OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
             RETURN caller.signature AS callerSignature,
+                   caller.name AS callerName,
                    caller.ownerDisplayName AS callerOwner,
                    caller.startLine AS callerStartLine,
                    caller.endLine AS callerEndLine,
                    callee.signature AS calleeSignature,
+                   callee.name AS calleeName,
                    callee.ownerDisplayName AS calleeOwner,
                    callerFile.path AS callerPath
             ORDER BY caller.signature, callee.signature
@@ -677,13 +726,13 @@ class MemgraphIngesterTools:
         if compact:
             rows = [
                 {
-                    "caller": row.get("callerSignature"),
                     "owner": row.get("callerOwner"),
+                    "name": row.get("callerName") or _method_name(row.get("callerSignature")),
                     "path": row.get("callerPath"),
                     "startLine": row.get("callerStartLine"),
                     "endLine": row.get("callerEndLine"),
-                    "callee": row.get("calleeSignature"),
                     "calleeOwner": row.get("calleeOwner"),
+                    "calleeName": row.get("calleeName") or _method_name(row.get("calleeSignature")),
                 }
                 for row in rows
             ]
@@ -703,21 +752,23 @@ class MemgraphIngesterTools:
         caller_fragment: str,
         project: str | None = None,
         skip: int = 0,
-        limit: int = 25,
+        limit: int = CALL_GRAPH_LIMIT,
         compact: bool = True,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         skip_value = _bounded_skip(skip)
-        limit_value = _bounded_limit(limit, default=25, maximum=100)
+        limit_value = _bounded_limit(limit, default=CALL_GRAPH_LIMIT, maximum=100)
         rows = self.client.run(
             """
             MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
             WHERE caller.signature CONTAINS $fragment
             OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
             RETURN caller.signature AS callerSignature,
+                   caller.name AS callerName,
                    caller.ownerDisplayName AS callerOwner,
                    callee.signature AS calleeSignature,
+                   callee.name AS calleeName,
                    callee.ownerDisplayName AS calleeOwner,
                    callee.startLine AS calleeStartLine,
                    callee.endLine AS calleeEndLine,
@@ -746,8 +797,9 @@ class MemgraphIngesterTools:
             rows = [
                 {
                     "callerOwner": row.get("callerOwner"),
-                    "callee": row.get("calleeSignature"),
+                    "callerName": row.get("callerName") or _method_name(row.get("callerSignature")),
                     "owner": row.get("calleeOwner"),
+                    "name": row.get("calleeName") or _method_name(row.get("calleeSignature")),
                     "path": row.get("calleePath"),
                     "startLine": row.get("calleeStartLine"),
                     "endLine": row.get("calleeEndLine"),
@@ -768,14 +820,14 @@ class MemgraphIngesterTools:
     def code_hot_paths(
         self,
         project: str | None = None,
-        limit: int = 20,
+        limit: int = DISCOVERY_LIMIT,
         include_tests: bool = False,
-        include_evidence: bool = True,
+        include_evidence: bool = False,
         sections: Sequence[str] | str | None = None,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
-        bounded_limit = _bounded_limit(limit, default=20, maximum=50)
+        bounded_limit = _bounded_limit(limit, default=DISCOVERY_LIMIT, maximum=50)
         requested_sections = _normalize_sections(
             sections,
             allowed=HOT_PATH_SECTIONS,
@@ -794,9 +846,10 @@ class MemgraphIngesterTools:
                   AND (type:Class OR type:Interface OR type:Annotation)
                 OPTIONAL MATCH (type)-[:DECLARES]->(method:Method {project: $project})
                 WITH file, type, count(DISTINCT method) AS methods
-                RETURN 'type' AS kind, type.fqn AS id, labels(type)[0] AS label,
-                       methods AS score, file.path AS path, null AS startLine, null AS endLine
-                ORDER BY score DESC, id
+                RETURN 'type' AS kind, labels(type)[0] AS owner, type.name AS name,
+                       methods AS score, file.path AS path, null AS startLine,
+                       null AS endLine, type.fqn AS sortKey
+                ORDER BY score DESC, sortKey
                 LIMIT $limit
                 """,
                 params,
@@ -813,10 +866,11 @@ class MemgraphIngesterTools:
                   AND method.startLine IS NOT NULL AND method.endLine IS NOT NULL
                   AND coalesce(method.isSynthetic, false) = false
                 WITH file, method, method.endLine - method.startLine + 1 AS lines
-                RETURN 'method' AS kind, method.signature AS id, method.ownerDisplayName AS label,
+                RETURN 'method' AS kind, method.ownerDisplayName AS owner, method.name AS name,
                        lines AS score, file.path AS path,
-                       method.startLine AS startLine, method.endLine AS endLine
-                ORDER BY score DESC, id
+                       method.startLine AS startLine, method.endLine AS endLine,
+                       method.signature AS sortKey
+                ORDER BY score DESC, sortKey
                 LIMIT $limit
                 """,
                 params,
@@ -832,10 +886,11 @@ class MemgraphIngesterTools:
                 OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
                 WITH method, file, count(call) AS callers
                 WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-                RETURN 'fanIn' AS kind, method.signature AS id, method.ownerDisplayName AS label,
+                RETURN 'fanIn' AS kind, method.ownerDisplayName AS owner, method.name AS name,
                        callers AS score, file.path AS path,
-                       method.startLine AS startLine, method.endLine AS endLine
-                ORDER BY score DESC, id
+                       method.startLine AS startLine, method.endLine AS endLine,
+                       method.signature AS sortKey
+                ORDER BY score DESC, sortKey
                 LIMIT $limit
                 """,
                 params,
@@ -851,10 +906,11 @@ class MemgraphIngesterTools:
                 OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
                 WITH method, file, count(call) AS callees
                 WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-                RETURN 'fanOut' AS kind, method.signature AS id, method.ownerDisplayName AS label,
+                RETURN 'fanOut' AS kind, method.ownerDisplayName AS owner, method.name AS name,
                        callees AS score, file.path AS path,
-                       method.startLine AS startLine, method.endLine AS endLine
-                ORDER BY score DESC, id
+                       method.startLine AS startLine, method.endLine AS endLine,
+                       method.signature AS sortKey
+                ORDER BY score DESC, sortKey
                 LIMIT $limit
                 """,
                 params,
@@ -871,6 +927,7 @@ class MemgraphIngesterTools:
         ):
             for row in section_rows:
                 row["section"] = section
+                row.pop("sortKey", None)
                 if not include_evidence:
                     row.pop("path", None)
                     row.pop("startLine", None)
@@ -900,12 +957,12 @@ class MemgraphIngesterTools:
     def code_quality_stats(
         self,
         project: str | None = None,
-        include_tests: bool = True,
-        limit: int = 20,
+        include_tests: bool = False,
+        limit: int = DISCOVERY_LIMIT,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
-        bounded_limit = _bounded_limit(limit, default=20, maximum=50)
+        bounded_limit = _bounded_limit(limit, default=DISCOVERY_LIMIT, maximum=50)
         params = {
             "project": project_name,
             "limit": bounded_limit,
