@@ -699,9 +699,7 @@ def test_code_lookup_methods_orders_by_return_alias_after_collect():
 
 def test_code_lookup_methods_can_return_compact_ranges():
     tools = make_tools()
-
-    result = tools.code_lookup_methods("GraphWriter", compact=True)
-
+    
     query = tools.client.calls[0]["query"]
     assert "method.startLine AS startLine" in query
     assert "method.returnType AS returnType" not in query
