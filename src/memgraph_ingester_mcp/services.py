@@ -85,7 +85,7 @@ def _to_table_json(value: Any) -> Any:
                     columns.append(column)
         return {
             "cols": columns,
-            "rows": [[row.get(column) for column in columns] for row in value],
+            "rows": [[_to_table_json(row.get(column)) for column in columns] for row in value],
         }
     return value
 
@@ -453,6 +453,8 @@ class MemgraphIngesterTools:
         member_limit: int = 50,
         member_summary: bool = True,
         limit: int = 20,
+        compact: bool = False,
+        output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         if not type_name and not fqn:
@@ -469,15 +471,25 @@ class MemgraphIngesterTools:
             {"project": project_name, "type_name": type_name, "fqn": fqn},
         )
         total_count = count_rows[0].get("count", 0) if count_rows else 0
+        type_projection = (
+            """
+                   labels(t) AS labels, t.fqn AS fqn, t.name AS name, t.kind AS kind,
+                   collect(DISTINCT file.path) AS files
+            """
+            if compact
+            else """
+                   labels(t) AS labels, t.fqn AS fqn, t.name AS name, t.kind AS kind,
+                   t.visibility AS visibility, t.isExternal AS isExternal,
+                   t.language AS language, t.framework AS framework,
+                   t.modulePath AS modulePath, collect(DISTINCT file.path) AS files
+            """
+        )
         types = self.client.run(
             f"""
             MATCH (t {{project: $project}})
             WHERE (t:Class OR t:Interface OR t:Annotation) AND {predicate}
             OPTIONAL MATCH (file:File {{project: $project}})-[:DEFINES]->(t)
-            RETURN labels(t) AS labels, t.fqn AS fqn, t.name AS name, t.kind AS kind,
-                   t.visibility AS visibility, t.isExternal AS isExternal,
-                   t.language AS language, t.framework AS framework,
-                   t.modulePath AS modulePath, collect(DISTINCT file.path) AS files
+            RETURN {type_projection.strip()}
             ORDER BY fqn
             LIMIT $limit
             """,
@@ -506,41 +518,62 @@ class MemgraphIngesterTools:
                     item["memberCounts"] = summary[0] if summary else {"methods": 0, "fields": 0}
                 if not include_members or not item_fqn:
                     continue
-                item["methods"] = self.client.run(
+                method_projection = (
                     """
-                    MATCH (t {project: $project, fqn: $fqn})-[:DECLARES]->(m:Method)
+                    m.signature AS signature, m.name AS name, m.startLine AS startLine,
+                    m.endLine AS endLine
+                    """
+                    if compact
+                    else """
+                    m.signature AS signature, m.name AS name, m.startLine AS startLine,
+                    m.endLine AS endLine, m.returnType AS returnType,
+                    m.visibility AS visibility, m.isStatic AS isStatic,
+                    m.isSynthetic AS isSynthetic
+                    """
+                )
+                item["methods"] = self.client.run(
+                    f"""
+                    MATCH (t {{project: $project, fqn: $fqn}})-[:DECLARES]->(m:Method)
                     WHERE (t:Class OR t:Interface OR t:Annotation)
-                    RETURN m.signature AS signature, m.name AS name, m.startLine AS startLine,
-                           m.endLine AS endLine, m.returnType AS returnType,
-                           m.visibility AS visibility, m.isStatic AS isStatic,
-                           m.isSynthetic AS isSynthetic
+                    RETURN {method_projection.strip()}
                     ORDER BY m.name, m.signature
                     LIMIT $limit
                     """,
                     {"project": project_name, "fqn": item_fqn, "limit": bounded_member_limit},
                 )
-                item["fields"] = self.client.run(
+                field_projection = (
+                    "field.fqn AS fqn, field.name AS name"
+                    if compact
+                    else """
+                    field.fqn AS fqn, field.name AS name, field.type AS type,
+                    field.visibility AS visibility, field.isStatic AS isStatic,
+                    field.kind AS kind
                     """
-                    MATCH (t {project: $project, fqn: $fqn})-[:DECLARES]->(field:Field)
+                )
+                item["fields"] = self.client.run(
+                    f"""
+                    MATCH (t {{project: $project, fqn: $fqn}})-[:DECLARES]->(field:Field)
                     WHERE (t:Class OR t:Interface OR t:Annotation)
-                    RETURN field.fqn AS fqn, field.name AS name, field.type AS type,
-                           field.visibility AS visibility, field.isStatic AS isStatic,
-                           field.kind AS kind
+                    RETURN {field_projection.strip()}
                     ORDER BY field.name
                     LIMIT $limit
                     """,
                     {"project": project_name, "fqn": item_fqn, "limit": bounded_member_limit},
                 )
-        return _with_result_meta(
-            {"project": project_name, "types": types},
-            types,
-            limit=bounded_limit,
-            total_count=total_count,
-            extra={
-                "includeMembers": include_members,
-                "memberLimit": bounded_member_limit if include_members else None,
-                "memberSummary": member_summary,
-            },
+        return _format_response(
+            _with_result_meta(
+                {"project": project_name, "types": types},
+                types,
+                limit=bounded_limit,
+                total_count=total_count,
+                extra={
+                    "includeMembers": include_members,
+                    "memberLimit": bounded_member_limit if include_members else None,
+                    "memberSummary": member_summary,
+                    "compact": compact,
+                },
+            ),
+            output_format,
         )
 
     def code_lookup_methods(

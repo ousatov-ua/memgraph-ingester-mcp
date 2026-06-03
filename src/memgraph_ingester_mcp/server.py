@@ -68,6 +68,8 @@ def create_server(
         member_limit: int = 50,
         member_summary: bool = True,
         limit: int = 20,
+        compact: bool = False,
+        format: str = "json",
     ) -> dict[str, Any]:
         """Look up classes, interfaces, or annotations by simple name or FQN."""
 
@@ -79,6 +81,8 @@ def create_server(
             member_limit,
             member_summary,
             limit,
+            compact,
+            output_format=format,
         )
 
     @mcp.tool()

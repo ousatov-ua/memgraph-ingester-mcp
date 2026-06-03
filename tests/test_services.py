@@ -107,20 +107,24 @@ class CodeLookupClient:
         if "RETURN count(t) AS count" in query:
             return [{"count": 1}]
         if "collect(DISTINCT file.path) AS files" in query:
-            return [
-                {
-                    "labels": ["Class"],
-                    "fqn": "demo.Foo",
-                    "name": "Foo",
-                    "kind": "class",
-                    "visibility": "public",
-                    "isExternal": False,
-                    "language": "java",
-                    "framework": "",
-                    "modulePath": "",
-                    "files": ["src/main/java/demo/Foo.java"],
-                }
-            ]
+            row = {
+                "labels": ["Class"],
+                "fqn": "demo.Foo",
+                "name": "Foo",
+                "kind": "class",
+            }
+            if "t.visibility AS visibility" in query:
+                row.update(
+                    {
+                        "visibility": "public",
+                        "isExternal": False,
+                        "language": "java",
+                        "framework": "",
+                        "modulePath": "",
+                    }
+                )
+            row["files"] = ["src/main/java/demo/Foo.java"]
+            return [row]
         if "RETURN methods AS methods" in query:
             return [{"methods": 7, "fields": 2}]
         if "RETURN m.signature AS signature" in query:
@@ -214,6 +218,82 @@ def test_code_lookup_type_expands_members_only_when_requested():
     member_calls = [call for call in client.calls if "LIMIT $limit" in call["query"]]
     assert member_calls[-2]["parameters"]["limit"] == 3
     assert member_calls[-1]["parameters"]["limit"] == 3
+
+
+def test_code_lookup_type_can_return_table_json():
+    client = CodeLookupClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_lookup_type(type_name="Foo", output_format="table_json")
+
+    assert result["types"]["cols"] == [
+        "labels",
+        "fqn",
+        "name",
+        "kind",
+        "visibility",
+        "isExternal",
+        "language",
+        "framework",
+        "modulePath",
+        "files",
+        "memberCounts",
+    ]
+    assert result["types"]["rows"] == [
+        [
+            ["Class"],
+            "demo.Foo",
+            "Foo",
+            "class",
+            "public",
+            False,
+            "java",
+            "",
+            "",
+            ["src/main/java/demo/Foo.java"],
+            {"methods": 7, "fields": 2},
+        ]
+    ]
+    assert result["meta"]["format"] == "table_json"
+
+
+def test_code_lookup_type_compact_omits_low_value_type_fields():
+    client = CodeLookupClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_lookup_type(type_name="Foo", compact=True)
+
+    item = result["types"][0]
+    assert "visibility" not in item
+    assert "isExternal" not in item
+    assert "language" not in item
+    assert "framework" not in item
+    assert "modulePath" not in item
+    assert result["meta"]["compact"] is True
+
+
+def test_code_lookup_type_table_json_compacts_nested_members():
+    client = CodeLookupClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_lookup_type(
+        type_name="Foo",
+        include_members=True,
+        member_limit=3,
+        output_format="table_json",
+    )
+
+    methods_index = result["types"]["cols"].index("methods")
+    fields_index = result["types"]["cols"].index("fields")
+    row = result["types"]["rows"][0]
+    assert row[methods_index] == {
+        "cols": ["signature", "name"],
+        "rows": [["demo.Foo.a()", "a"]],
+    }
+    assert row[fields_index] == {
+        "cols": ["fqn", "name"],
+        "rows": [["demo.Foo.x", "x"]],
+    }
 
 
 def test_code_search_omits_text_and_dedupes_by_default():
