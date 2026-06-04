@@ -431,6 +431,138 @@ class UniversalFlowClient:
         return []
 
 
+class CodeContextClient:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, query, parameters=None, *, write=False):
+        params = dict(parameters or {})
+        self.calls.append({"query": query, "parameters": params, "write": write})
+        if "CALL vector_search.search" in query:
+            return [
+                {
+                    "kind": "Method",
+                    "sourceId": "demo.Writer.refresh()",
+                    "owner": "Writer",
+                    "name": "refresh",
+                    "path": "src/main/java/demo/Writer.java",
+                    "ragRole": "primary",
+                    "startLine": 10,
+                    "endLine": 40,
+                    "score": 0.91,
+                },
+                {
+                    "kind": "File",
+                    "sourceId": "src/main/java/demo/Orchestrator.java",
+                    "owner": None,
+                    "name": "src/main/java/demo/Orchestrator.java",
+                    "path": "src/main/java/demo/Orchestrator.java",
+                    "ragRole": "file",
+                    "startLine": None,
+                    "endLine": None,
+                    "score": 0.84,
+                },
+            ]
+        if "HAS_RAG_CHUNK" in query and "haystack" in query:
+            return [
+                {
+                    "kind": "Method",
+                    "sourceId": "demo.Orchestrator.run()",
+                    "owner": "Orchestrator",
+                    "name": "run",
+                    "path": "src/main/java/demo/Orchestrator.java",
+                    "startLine": 50,
+                    "endLine": 90,
+                }
+            ]
+        if "definitionCount" in query and "MATCH (file:File" in query:
+            return [
+                {
+                    "path": "src/main/java/demo/Writer.java",
+                    "language": "java",
+                    "definitionCount": 3,
+                    "chunkCount": 6,
+                },
+                {
+                    "path": "src/main/java/demo/Orchestrator.java",
+                    "language": "java",
+                    "definitionCount": 2,
+                    "chunkCount": 4,
+                },
+            ]
+        if "node:Class OR node:Interface OR node:Annotation" in query:
+            return [
+                {
+                    "path": "src/main/java/demo/Writer.java",
+                    "label": "Class",
+                    "name": "Writer",
+                    "fqn": "demo.Writer",
+                    "kind": "class",
+                    "startLine": 1,
+                    "endLine": 80,
+                },
+                {
+                    "path": "src/main/java/demo/Orchestrator.java",
+                    "label": "Class",
+                    "name": "Orchestrator",
+                    "fqn": "demo.Orchestrator",
+                    "kind": "class",
+                    "startLine": 1,
+                    "endLine": 120,
+                },
+            ]
+        if "method:Method" in query and "RETURN file.path AS path" in query:
+            return [
+                {
+                    "path": "src/main/java/demo/Writer.java",
+                    "owner": "Writer",
+                    "name": "refresh",
+                    "signature": "demo.Writer.refresh()",
+                    "startLine": 10,
+                    "endLine": 40,
+                },
+                {
+                    "path": "src/main/java/demo/Orchestrator.java",
+                    "owner": "Orchestrator",
+                    "name": "run",
+                    "signature": "demo.Orchestrator.run()",
+                    "startLine": 50,
+                    "endLine": 90,
+                },
+            ]
+        if "field:Field" in query:
+            return [
+                {
+                    "path": "src/main/java/demo/Writer.java",
+                    "owner": "Writer",
+                    "name": "cypher",
+                    "fqn": "demo.Writer.cypher",
+                    "startLine": 7,
+                    "endLine": 7,
+                }
+            ]
+        if "ragRole" in query and "count(*) AS count" in query:
+            return [
+                {"path": "src/main/java/demo/Writer.java", "ragRole": "primary", "count": 3},
+                {"path": "src/main/java/demo/Writer.java", "ragRole": "file", "count": 1},
+                {"path": "src/main/java/demo/Orchestrator.java", "ragRole": "primary", "count": 2},
+            ]
+        if "-[:CALLS]->" in query and "callerFile.path IN $paths" in query:
+            return [
+                {
+                    "callerPath": "src/main/java/demo/Orchestrator.java",
+                    "callerOwner": "Orchestrator",
+                    "caller": "run",
+                    "callerStartLine": 50,
+                    "calleePath": "src/main/java/demo/Writer.java",
+                    "calleeOwner": "Writer",
+                    "callee": "refresh",
+                    "calleeStartLine": 10,
+                }
+            ]
+        return []
+
+
 class OrientationClient:
     def __init__(self):
         self.calls = []
@@ -649,6 +781,85 @@ def test_code_text_search_returns_compact_hits():
     assert result["meta"]["format"] == "table_json"
 
 
+def test_code_file_context_returns_compact_file_outlines():
+    client = CodeContextClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_file_context(
+        ["Writer.java", "Orchestrator.java"],
+        symbol_limit=1,
+        output_format="table_json",
+    )
+
+    assert result["files"]["cols"] == [
+        "path",
+        "language",
+        "definitionCount",
+        "chunkCount",
+        "chunkRoles",
+        "types",
+        "methods",
+        "fields",
+    ]
+    writer_row = result["files"]["rows"][0]
+    assert writer_row[0] == "src/main/java/demo/Writer.java"
+    assert writer_row[4] == {
+        "cols": ["ragRole", "count"],
+        "rows": [["primary", 3]],
+    }
+    assert writer_row[5]["rows"] == [["Class", "Writer", "demo.Writer", "class", 1, 80]]
+    assert writer_row[6]["rows"] == [["Writer", "refresh", "demo.Writer.refresh()", 10, 40]]
+    assert writer_row[7]["rows"] == [["Writer", "cypher", "demo.Writer.cypher", 7, 7]]
+    assert result["meta"]["symbolLimit"] == 1
+    assert client.calls[0]["parameters"]["fragments"] == ["Writer.java", "Orchestrator.java"]
+
+
+def test_code_flow_context_bundles_anchors_files_and_edges():
+    client = CodeContextClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_flow_context(
+        "refresh stale code chunks",
+        limit_files=2,
+        anchor_limit=2,
+        symbol_limit=1,
+        output_format="table_json",
+    )
+
+    assert result["anchors"]["cols"] == [
+        "kind",
+        "sourceId",
+        "owner",
+        "name",
+        "path",
+        "ragRole",
+        "startLine",
+        "endLine",
+        "score",
+    ]
+    assert result["lexicalAnchors"]["rows"][0][3] == "run"
+    assert result["files"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
+    assert result["flowEdges"]["rows"] == [
+        [
+            "src/main/java/demo/Orchestrator.java",
+            "Orchestrator",
+            "run",
+            50,
+            "src/main/java/demo/Writer.java",
+            "Writer",
+            "refresh",
+            10,
+        ]
+    ]
+    assert result["meta"]["selectedPaths"] == [
+        "src/main/java/demo/Orchestrator.java",
+        "src/main/java/demo/Writer.java",
+    ]
+    assert result["meta"]["lexicalTerms"] == ["refresh", "stale", "code", "chunks"]
+    edge_call = client.calls[-1]
+    assert edge_call["parameters"]["limit"] == 2
+
+
 def test_table_json_rejects_unknown_format():
     tools = make_tools()
 
@@ -674,6 +885,10 @@ def test_registered_code_tool_defaults_are_discovery_sized():
     assert "rag_roles" in registered["code_text_search"].parameters["properties"]
     assert registered["code_text_search"].parameters["properties"]["limit"]["default"] == 5
     assert registered["code_discovery_context"].parameters["properties"]["limit"]["default"] == 3
+    assert registered["code_file_context"].parameters["properties"]["limit_files"]["default"] == 5
+    assert registered["code_file_context"].parameters["properties"]["symbol_limit"]["default"] == 8
+    assert registered["code_flow_context"].parameters["properties"]["limit_files"]["default"] == 5
+    assert registered["code_flow_context"].parameters["properties"]["anchor_limit"]["default"] == 8
     assert registered["code_lookup_type"].parameters["properties"]["limit"]["default"] == 10
     assert (
         registered["code_lookup_type"].parameters["properties"]["include_tests"]["default"] is False

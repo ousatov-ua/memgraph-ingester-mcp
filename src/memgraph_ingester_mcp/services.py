@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from typing import Any
 
+from memgraph_ingester_mcp.code_context import CodeContextMixin
 from memgraph_ingester_mcp.config import MemgraphConfig
 from memgraph_ingester_mcp.db import MemgraphClient, MemgraphError
 from memgraph_ingester_mcp.schema import (
@@ -153,6 +154,10 @@ def _normalize_extensions(value: Sequence[str] | str | None) -> list[str]:
     if not raw:
         return list(RESOURCE_SCAN_EXTENSIONS)
     return [item if item.startswith(".") else f".{item}" for item in raw]
+
+
+def _bounded_symbol_limit(limit: int) -> int:
+    return _bounded_limit(limit, default=8, maximum=50)
 
 
 def _source_excerpt(value: str | None) -> str:
@@ -534,7 +539,7 @@ def _ensure_project_scoped(query: str) -> None:
         )
 
 
-class MemgraphIngesterTools:
+class MemgraphIngesterTools(CodeContextMixin):
     """Safe operations that cover the generated Memgraph instruction templates."""
 
     def __init__(self, client: MemgraphClient, config: MemgraphConfig) -> None:

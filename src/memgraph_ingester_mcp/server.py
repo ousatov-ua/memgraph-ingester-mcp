@@ -138,6 +138,48 @@ def create_server(
         )
 
     @mcp.tool()
+    def code_file_context(
+        path_fragments: list[str] | None = None,
+        project: str | None = None,
+        limit_files: int = 5,
+        symbol_limit: int = 8,
+        include_tests: bool = False,
+        format: str = "table_json",
+    ) -> dict[str, Any]:
+        """Return compact file outlines with chunk roles and top symbols."""
+
+        return tools.code_file_context(
+            path_fragments=path_fragments,
+            project=project,
+            limit_files=limit_files,
+            symbol_limit=symbol_limit,
+            include_tests=include_tests,
+            output_format=format,
+        )
+
+    @mcp.tool()
+    def code_flow_context(
+        query: str,
+        project: str | None = None,
+        limit_files: int = 5,
+        anchor_limit: int = 8,
+        symbol_limit: int = 8,
+        include_tests: bool = False,
+        format: str = "table_json",
+    ) -> dict[str, Any]:
+        """Return semantic and lexical anchors, file outlines, and nearby call edges."""
+
+        return tools.code_flow_context(
+            query=query,
+            project=project,
+            limit_files=limit_files,
+            anchor_limit=anchor_limit,
+            symbol_limit=symbol_limit,
+            include_tests=include_tests,
+            output_format=format,
+        )
+
+    @mcp.tool()
     def code_lookup_type(
         project: str | None = None,
         type_name: str | None = None,
