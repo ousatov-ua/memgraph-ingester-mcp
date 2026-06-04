@@ -52,6 +52,12 @@ def create_server(
         include_text: bool = False,
         text_limit: int = 160,
         dedupe_by_source: bool = True,
+        kinds: list[str] | None = None,
+        path_prefixes: list[str] | None = None,
+        path_contains: str | None = None,
+        owner_fragment: str | None = None,
+        min_score: float = 0.0,
+        include_keys: bool = False,
         format: str = "table_json",
     ) -> dict[str, Any]:
         """Search CodeChunk embeddings and return source-linked discovery hits."""
@@ -64,6 +70,62 @@ def create_server(
             include_text=include_text,
             text_limit=text_limit,
             dedupe_by_source=dedupe_by_source,
+            kinds=kinds,
+            path_prefixes=path_prefixes,
+            path_contains=path_contains,
+            owner_fragment=owner_fragment,
+            min_score=min_score,
+            include_keys=include_keys,
+            output_format=format,
+        )
+
+    @mcp.tool()
+    def code_text_search(
+        query: str | None = None,
+        project: str | None = None,
+        all_terms: list[str] | None = None,
+        any_terms: list[str] | None = None,
+        limit: int = DISCOVERY_LIMIT,
+        include_tests: bool = False,
+        include_text: bool = False,
+        text_limit: int = 160,
+        kinds: list[str] | None = None,
+        path_contains: str | None = None,
+        format: str = "table_json",
+    ) -> dict[str, Any]:
+        """Search indexed chunk text lexically with compact source-linked rows."""
+
+        return tools.code_text_search(
+            query=query,
+            project=project,
+            all_terms=all_terms,
+            any_terms=any_terms,
+            limit=limit,
+            include_tests=include_tests,
+            include_text=include_text,
+            text_limit=text_limit,
+            kinds=kinds,
+            path_contains=path_contains,
+            output_format=format,
+        )
+
+    @mcp.tool()
+    def code_discovery_context(
+        query: str,
+        project: str | None = None,
+        limit: int = 3,
+        include_tests: bool = False,
+        neighbor_limit: int = 3,
+        format: str = "table_json",
+    ) -> dict[str, Any]:
+        """Return top semantic anchors plus bounded exact/call/file context."""
+
+        return tools.code_discovery_context(
+            query=query,
+            project=project,
+            limit=limit,
+            include_tests=include_tests,
+            neighbor_limit=neighbor_limit,
             output_format=format,
         )
 
@@ -170,6 +232,7 @@ def create_server(
         depth: int = 2,
         include_tests: bool = True,
         compact: bool = True,
+        view: str = "callers",
         format: str = "table_json",
     ) -> dict[str, Any]:
         """Map refactor impact for matching methods through direct and one-level callers."""
@@ -182,6 +245,7 @@ def create_server(
             depth=depth,
             include_tests=include_tests,
             compact=compact,
+            view=view,
             output_format=format,
         )
 
@@ -272,6 +336,28 @@ def create_server(
         )
 
     @mcp.tool()
+    def code_operation_hot_paths(
+        project: str | None = None,
+        sink_fragments: list[str] | None = None,
+        owner_fragment: str | None = None,
+        path_contains: str | None = None,
+        limit: int = DISCOVERY_LIMIT,
+        include_tests: bool = False,
+        format: str = "table_json",
+    ) -> dict[str, Any]:
+        """Return methods with many calls to operation-like sinks such as run/query/write."""
+
+        return tools.code_operation_hot_paths(
+            project=project,
+            sink_fragments=sink_fragments,
+            owner_fragment=owner_fragment,
+            path_contains=path_contains,
+            limit=limit,
+            include_tests=include_tests,
+            output_format=format,
+        )
+
+    @mcp.tool()
     def code_quality_stats(
         project: str | None = None,
         include_tests: bool = False,
@@ -287,6 +373,24 @@ def create_server(
         """Return class ancestry, children, interfaces, and interface implementors."""
 
         return tools.code_hierarchy(fqn, project)
+
+    @mcp.tool()
+    def code_test_context(
+        test_fragment: str,
+        project: str | None = None,
+        limit: int = DISCOVERY_LIMIT,
+        production_limit: int = DISCOVERY_LIMIT,
+        format: str = "table_json",
+    ) -> dict[str, Any]:
+        """Return matching tests and production callees for CI/test triage."""
+
+        return tools.code_test_context(
+            test_fragment=test_fragment,
+            project=project,
+            limit=limit,
+            production_limit=production_limit,
+            output_format=format,
+        )
 
     @mcp.tool()
     def memory_orientation(project: str | None = None, compact: bool = False) -> dict[str, Any]:

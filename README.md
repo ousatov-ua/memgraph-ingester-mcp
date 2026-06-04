@@ -16,7 +16,9 @@ Code graph tools:
 - `code_orientation`: compact package/type/call overview; pass `sections` to keep it focused.
 - `code_quality_stats`: graph-wide code quality and quantity metrics; defaults to non-test code and a 5-row first page.
 - `code_hot_paths`: compact hot-path candidates from size and call graph metrics; defaults to 5 owner/name rows per selected section.
-- `code_search`: CodeChunk vector search for broad discovery; defaults to 5 non-test, deduped, range-first hits and omits text.
+- `code_search`: CodeChunk vector search for broad discovery; defaults to 5 non-test, deduped, range-first hits and omits text/source keys unless requested; supports compact filters.
+- `code_text_search`: lexical search over indexed chunk text/path/source ids for concrete-term discovery.
+- `code_discovery_context`: semantic discovery plus bounded exact/caller/callee/file context in one compact response.
 - `code_lookup_type`: exact class/interface/annotation lookup; test code and member expansion are opt-in.
 - `code_lookup_methods`: exact method lookup with source ranges; defaults to 10 compact owner/name/path rows.
 - `code_lookup_field`: exact field/constant lookup by FQN or name fragment; defaults to compact owner/name/FQN/path rows.
@@ -24,6 +26,8 @@ Code graph tools:
 - `code_callers`, `code_callees`: compact, paginated, non-test, range-first call graph lookups; default first page is 10 rows.
 - `code_method_context`: bundled exact method lookup plus caller and callee context; use instead of separate lookup/callers/callees calls while tracing one target.
 - `code_impact`: refactor blast-radius lookup for matching method signatures; returns target methods plus depth-1/depth-2 callers, test flags, and file/package boundary flags.
+- `code_operation_hot_paths`: operation-sink hot paths for performance work, grouping methods that call APIs like run/query/write/read/save/delete; accepts owner/path filters for subsystem-focused audits.
+- `code_test_context`: failing-test/CI triage from a test name or class fragment to tests, test files, and production callees.
 - `code_hierarchy`: class ancestry, children, interfaces, and interface implementors.
 
 Memory tools:
@@ -173,10 +177,14 @@ preemptively. For performance work, start with `code_hot_paths`; add `code_quali
 you need graph-wide baselines. Compact method/search/call-graph rows are range-first and omit full
 signatures; request non-compact output only when signatures or modifiers are needed. Use
 `code_method_context` when tracing one method so one MCP call replaces lookup plus callers plus
-callees. Most code tools exclude `src/test/` by default; pass `include_tests=true` only for test
-coverage or test-specific questions. Use `code_impact` first for method signature changes and
-blast-radius review; it includes tests by default and flags file/package boundaries. Use
-`code_lookup_field` for constants and member variables, and `code_lookup_file` for indexed source,
-resource, template, and Cypher path discovery before falling back to text search. Use
-`memory_orientation(compact=true)` for status checks and memory write tools for task lifecycle
-changes and CodeRef links so derived MemoryChunks stay refreshable.
+callees. Use `code_discovery_context` for concept-first work before separate RAG/refine loops, and
+use `code_text_search` when concrete terms are likely present. Most code tools exclude `src/test/`
+by default; pass `include_tests=true` only for test coverage or test-specific questions. Use
+`code_impact` first for method signature changes and blast-radius review; it includes tests by
+default and flags file/package boundaries. Use `code_operation_hot_paths` alongside
+`code_hot_paths` for performance/write-path audits; pass `owner_fragment` or `path_contains` when
+the question names a subsystem such as writer, storage, parser, or adapter. Use `code_test_context`
+first for failing test or CI triage. Use `code_lookup_field` for constants and member variables, and `code_lookup_file`
+for indexed source, resource, template, and Cypher path discovery before falling back to text
+search. Use `memory_orientation(compact=true)` for status checks and memory write tools for task
+lifecycle changes and CodeRef links so derived MemoryChunks stay refreshable.

@@ -337,6 +337,73 @@ class ImpactClient:
         return []
 
 
+class UniversalFlowClient:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, query, parameters=None, *, write=False):
+        params = dict(parameters or {})
+        self.calls.append({"query": query, "parameters": params, "write": write})
+        if "HAS_RAG_CHUNK" in query and "haystack" in query:
+            return [
+                {
+                    "kind": "Method",
+                    "sourceId": "demo.Writer.refresh()",
+                    "owner": "Writer",
+                    "name": "refresh",
+                    "path": "src/main/java/demo/Writer.java",
+                    "startLine": 10,
+                    "endLine": 20,
+                    "text": "stale chunks are refreshed",
+                }
+            ]
+        if "sinkCallEdges" in query:
+            return [
+                {
+                    "owner": "Writer",
+                    "name": "refresh",
+                    "signature": "demo.Writer.refresh()",
+                    "path": "src/main/java/demo/Writer.java",
+                    "startLine": 10,
+                    "endLine": 60,
+                    "lines": 51,
+                    "sinkCallEdges": 6,
+                    "distinctSinks": 3,
+                    "sinks": ["Executor.run", "Executor.read"],
+                    "score": 6051,
+                }
+            ]
+        if "file.path STARTS WITH 'src/test/'" in query or "testFile.path STARTS" in query:
+            if "CALLS" in query:
+                return [
+                    {
+                        "owner": "Writer",
+                        "name": "refresh",
+                        "signature": "demo.Writer.refresh()",
+                        "path": "src/main/java/demo/Writer.java",
+                        "startLine": 10,
+                        "endLine": 20,
+                        "testOwner": "WriterTest",
+                        "testName": "refreshes",
+                    }
+                ]
+            if "RETURN file.path AS path, file.language AS language" in query:
+                return [{"path": "src/test/java/demo/WriterTest.java", "language": "java"}]
+            return [
+                {
+                    "owner": "WriterTest",
+                    "name": "refreshes",
+                    "signature": "demo.WriterTest.refreshes()",
+                    "path": "src/test/java/demo/WriterTest.java",
+                    "startLine": 30,
+                    "endLine": 40,
+                    "exactish": True,
+                    "termMatches": 1,
+                }
+            ]
+        return []
+
+
 class OrientationClient:
     def __init__(self):
         self.calls = []
@@ -500,6 +567,46 @@ def test_code_search_can_return_table_json():
     assert result["meta"]["format"] == "table_json"
 
 
+def test_code_search_can_include_keys_and_filters():
+    client = SearchClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_search(
+        "hot path",
+        kinds=["Method"],
+        path_contains="Foo",
+        include_keys=True,
+        output_format="table_json",
+    )
+
+    assert "sourceId" in result["hits"]["cols"]
+    assert result["meta"]["includeKeys"] is True
+    assert result["meta"]["filters"]["kinds"] == ["Method"]
+
+
+def test_code_text_search_returns_compact_hits():
+    client = UniversalFlowClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_text_search(
+        all_terms=["stale", "chunks"],
+        include_text=False,
+        output_format="table_json",
+    )
+
+    assert result["hits"]["cols"] == [
+        "kind",
+        "sourceId",
+        "owner",
+        "name",
+        "path",
+        "startLine",
+        "endLine",
+    ]
+    assert result["hits"]["rows"][0][3] == "refresh"
+    assert result["meta"]["format"] == "table_json"
+
+
 def test_table_json_rejects_unknown_format():
     tools = make_tools()
 
@@ -513,6 +620,9 @@ def test_registered_code_tool_defaults_are_discovery_sized():
 
     assert registered["code_search"].parameters["properties"]["limit"]["default"] == 5
     assert registered["code_search"].parameters["properties"]["include_tests"]["default"] is False
+    assert registered["code_search"].parameters["properties"]["include_keys"]["default"] is False
+    assert registered["code_text_search"].parameters["properties"]["limit"]["default"] == 5
+    assert registered["code_discovery_context"].parameters["properties"]["limit"]["default"] == 3
     assert registered["code_lookup_type"].parameters["properties"]["limit"]["default"] == 10
     assert (
         registered["code_lookup_type"].parameters["properties"]["include_tests"]["default"] is False
@@ -536,6 +646,7 @@ def test_registered_code_tool_defaults_are_discovery_sized():
     assert registered["code_impact"].parameters["properties"]["limit"]["default"] == 10
     assert registered["code_impact"].parameters["properties"]["depth"]["default"] == 2
     assert registered["code_impact"].parameters["properties"]["include_tests"]["default"] is True
+    assert registered["code_impact"].parameters["properties"]["view"]["default"] == "callers"
     assert registered["code_callers"].parameters["properties"]["limit"]["default"] == 10
     assert registered["code_callers"].parameters["properties"]["include_tests"]["default"] is False
     assert registered["code_callees"].parameters["properties"]["limit"]["default"] == 10
@@ -547,6 +658,10 @@ def test_registered_code_tool_defaults_are_discovery_sized():
         context_defaults["neighbor_limit"]["default"] == 5
     )
     assert registered["code_hot_paths"].parameters["properties"]["limit"]["default"] == 5
+    assert registered["code_operation_hot_paths"].parameters["properties"]["limit"]["default"] == 5
+    assert "owner_fragment" in registered["code_operation_hot_paths"].parameters["properties"]
+    assert "path_contains" in registered["code_operation_hot_paths"].parameters["properties"]
+    assert registered["code_test_context"].parameters["properties"]["limit"]["default"] == 5
     assert registered["code_quality_stats"].parameters["properties"]["limit"]["default"] == 5
     quality_defaults = registered["code_quality_stats"].parameters["properties"]
     assert quality_defaults["include_tests"]["default"] is False
@@ -1099,6 +1214,96 @@ def test_code_impact_returns_targets_and_boundary_flags():
     assert result["impacts"]["rows"][1][10:] == [True, True, True]
     assert result["meta"]["targetCount"] == 1
     assert result["meta"]["format"] == "table_json"
+
+
+def test_code_impact_can_return_file_view():
+    client = ImpactClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_impact(
+        "refreshCodeChunkEmbeddings",
+        view="files",
+        output_format="table_json",
+    )
+
+    assert result["files"]["cols"] == [
+        "path",
+        "role",
+        "minDepth",
+        "callerCount",
+        "testCallerCount",
+        "crossPackageCount",
+        "risk",
+    ]
+    assert result["meta"]["view"] == "files"
+
+
+def test_code_operation_hot_paths_returns_risk_hints():
+    client = UniversalFlowClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_operation_hot_paths(
+        owner_fragment="Writer",
+        path_contains="demo",
+        output_format="table_json",
+    )
+
+    assert result["operationHotPaths"]["cols"] == [
+        "owner",
+        "name",
+        "path",
+        "startLine",
+        "endLine",
+        "lines",
+        "sinkCallEdges",
+        "distinctSinks",
+        "sinks",
+        "score",
+        "riskHints",
+    ]
+    assert result["operationHotPaths"]["rows"][0][-1] == [
+        "many-sink-calls",
+        "large-method",
+        "multi-sink",
+    ]
+    assert client.calls[-1]["parameters"]["owner_fragment"] == "writer"
+    assert client.calls[-1]["parameters"]["path_contains"] == "demo"
+
+
+def test_code_test_context_returns_tests_and_production_callees():
+    client = UniversalFlowClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_test_context("refreshes", output_format="table_json")
+
+    assert result["tests"]["cols"] == [
+        "owner",
+        "name",
+        "signature",
+        "path",
+        "startLine",
+        "endLine",
+        "exactish",
+        "termMatches",
+    ]
+    assert result["productionCallees"]["rows"][0][0] == "Writer"
+    assert result["meta"]["exactMatches"] == 1
+    assert result["meta"]["methodFragment"] == "refreshes"
+
+
+def test_code_test_context_anchors_class_method_fragments():
+    client = UniversalFlowClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_test_context(
+        "WriterTest.refreshesDirtyCodeEmbeddingsInWatchMode",
+        output_format="json",
+    )
+
+    test_query_params = client.calls[-3]["parameters"]
+    assert test_query_params["owner_fragment"] == "WriterTest"
+    assert test_query_params["min_term_matches"] == 3
+    assert result["meta"]["terms"] == ["refreshes", "dirty", "embeddings", "watch"]
 
 
 def test_memory_orientation_can_be_compact():

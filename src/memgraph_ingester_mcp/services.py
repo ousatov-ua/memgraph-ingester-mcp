@@ -18,6 +18,7 @@ from memgraph_ingester_mcp.schema import (
 
 TOKEN_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 STRING_RE = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|[^A-Za-z0-9]+")
 
 CONTROLLED_VALUES: dict[tuple[str, str], frozenset[str]] = {
     ("Rule", "severity"): frozenset({"hard", "soft", "recommendation"}),
@@ -39,6 +40,24 @@ DISCOVERY_LIMIT = 5
 LOOKUP_LIMIT = 10
 CALL_GRAPH_LIMIT = 10
 MEMBER_LIMIT = 25
+DEFAULT_OPERATION_SINKS = frozenset(
+    {
+        "batch",
+        "commit",
+        "delete",
+        "execute",
+        "flush",
+        "insert",
+        "query",
+        "read",
+        "resolve",
+        "run",
+        "save",
+        "update",
+        "upsert",
+        "write",
+    }
+)
 
 
 def _bounded_limit(limit: int, *, default: int, maximum: int) -> int:
@@ -97,6 +116,60 @@ def _bounded_depth(depth: int) -> int:
     if depth <= 1:
         return 1
     return min(depth, 2)
+
+
+def _normalize_string_list(value: Sequence[str] | str | None) -> list[str]:
+    if value is None:
+        return []
+    raw = value.split(",") if isinstance(value, str) else list(value)
+    return [item.strip() for item in raw if item and item.strip()]
+
+
+def _normalize_lower_list(value: Sequence[str] | str | None) -> list[str]:
+    return [item.lower() for item in _normalize_string_list(value)]
+
+
+def _identifier_terms(value: str | None) -> list[str]:
+    if not value:
+        return []
+    terms = [term.lower() for term in CAMEL_BOUNDARY_RE.split(value) if len(term) >= 3]
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for term in terms:
+        if term in seen:
+            continue
+        seen.add(term)
+        deduped.append(term)
+    return deduped
+
+
+def _test_fragment_parts(value: str | None) -> tuple[str, str, list[str], int]:
+    fragment = (value or "").strip()
+    if "." not in fragment:
+        terms = _identifier_terms(fragment)
+        return "", fragment, terms, 1 if len(terms) <= 2 else 2
+
+    owner_fragment, method_fragment = fragment.rsplit(".", 1)
+    terms = _identifier_terms(method_fragment) or _identifier_terms(fragment)
+    method_terms = [term for term in terms if len(term) >= 5]
+    if method_terms:
+        terms = method_terms
+    min_matches = min(3, max(1, len(terms) - 1))
+    return owner_fragment, method_fragment, terms, min_matches
+
+
+def _contains_any(value: str | None, needles: Sequence[str]) -> bool:
+    if not needles:
+        return True
+    haystack = (value or "").lower()
+    return any(needle.lower() in haystack for needle in needles)
+
+
+def _starts_with_any(value: str | None, prefixes: Sequence[str]) -> bool:
+    if not prefixes:
+        return True
+    haystack = value or ""
+    return any(haystack.startswith(prefix) for prefix in prefixes)
 
 
 def _normalize_output_format(output_format: str | None) -> str:
@@ -411,6 +484,12 @@ class MemgraphIngesterTools:
         include_text: bool = False,
         text_limit: int = 160,
         dedupe_by_source: bool = True,
+        kinds: Sequence[str] | str | None = None,
+        path_prefixes: Sequence[str] | str | None = None,
+        path_contains: str | None = None,
+        owner_fragment: str | None = None,
+        min_score: float = 0.0,
+        include_keys: bool = False,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
@@ -460,6 +539,24 @@ class MemgraphIngesterTools:
                 "include_tests": include_tests,
             },
         )
+        kind_filter = frozenset(_normalize_string_list(kinds))
+        path_prefix_filter = _normalize_string_list(path_prefixes)
+        path_contains_filter = (path_contains or "").strip()
+        owner_filter = (owner_fragment or "").strip()
+        filtered_rows: list[dict[str, Any]] = []
+        for row in rows:
+            if kind_filter and row.get("kind") not in kind_filter:
+                continue
+            if not _starts_with_any(row.get("path"), path_prefix_filter):
+                continue
+            if path_contains_filter and path_contains_filter not in (row.get("path") or ""):
+                continue
+            if owner_filter and not _contains_any(row.get("owner"), [owner_filter]):
+                continue
+            if min_score > 0 and float(row.get("score") or 0) < min_score:
+                continue
+            filtered_rows.append(row)
+        rows = filtered_rows
         if dedupe_by_source:
             deduped: list[dict[str, Any]] = []
             seen: set[tuple[str, str]] = set()
@@ -472,18 +569,191 @@ class MemgraphIngesterTools:
                 if len(deduped) >= bounded_limit:
                     break
             rows = deduped
+        else:
+            rows = rows[:bounded_limit]
         for row in rows:
             if include_text:
                 row["text"] = _compact_text(row.get("text"), bounded_text_limit)
             else:
                 row.pop("text", None)
-            row.pop("sourceId", None)
+            if not include_keys:
+                row.pop("sourceId", None)
             row["owner"] = _compact_owner(row.get("owner"), row.get("name"))
         return _format_response(
             _with_result_meta(
-                {"project": project_name, "query": query, "hits": rows},
+                {
+                    "project": project_name,
+                    "query": query,
+                    "hits": rows,
+                },
                 rows,
                 limit=bounded_limit,
+                extra={
+                    "includeKeys": include_keys,
+                    "filters": {
+                        "kinds": sorted(kind_filter),
+                        "pathPrefixes": path_prefix_filter,
+                        "pathContains": path_contains_filter,
+                        "ownerFragment": owner_filter,
+                        "minScore": min_score,
+                    },
+                },
+            ),
+            output_format,
+        )
+
+    def code_text_search(
+        self,
+        query: str | None = None,
+        project: str | None = None,
+        all_terms: Sequence[str] | str | None = None,
+        any_terms: Sequence[str] | str | None = None,
+        limit: int = DISCOVERY_LIMIT,
+        include_tests: bool = False,
+        include_text: bool = False,
+        text_limit: int = 160,
+        kinds: Sequence[str] | str | None = None,
+        path_contains: str | None = None,
+        output_format: str = "json",
+    ) -> dict[str, Any]:
+        project_name = self.resolve_project(project)
+        bounded_limit = _bounded_limit(limit, default=DISCOVERY_LIMIT, maximum=50)
+        bounded_text_limit = _bounded_text_limit(text_limit)
+        required_terms = _normalize_lower_list(all_terms)
+        optional_terms = _normalize_lower_list(any_terms)
+        if query and not required_terms and not optional_terms:
+            required_terms = _normalize_lower_list(query)
+        if not required_terms and not optional_terms:
+            raise MemgraphError("Provide query, all_terms, or any_terms.")
+        kind_filter = _normalize_string_list(kinds)
+        path_contains_filter = (path_contains or "").strip()
+        text_projection = ", chunk.text AS text" if include_text else ""
+        rows = self.client.run(
+            f"""
+            MATCH (source {{project: $project}})
+              -[:HAS_RAG_CHUNK]->(chunk:CodeChunk {{project: $project}})
+            WITH source, chunk,
+                 toLower(coalesce(chunk.text, '') + ' ' + coalesce(chunk.path, '') + ' '
+                         + coalesce(chunk.sourceId, '')) AS haystack
+            WHERE ($include_tests OR chunk.path IS NULL OR NOT chunk.path STARTS WITH 'src/test/')
+              AND (size($all_terms) = 0 OR all(term IN $all_terms WHERE haystack CONTAINS term))
+              AND (size($any_terms) = 0 OR any(term IN $any_terms WHERE haystack CONTAINS term))
+              AND (size($kinds) = 0 OR coalesce(chunk.sourceLabel, labels(source)[0]) IN $kinds)
+              AND ($path_contains = '' OR chunk.path CONTAINS $path_contains)
+            RETURN coalesce(chunk.sourceLabel, labels(source)[0]) AS kind,
+                   chunk.sourceId AS sourceId,
+                   coalesce(source.ownerDisplayName, source.ownerFqn, chunk.ownerFqn) AS owner,
+                   coalesce(source.name, chunk.signature, chunk.sourceId) AS name,
+                   chunk.path AS path,
+                   source.startLine AS startLine,
+                   source.endLine AS endLine{text_projection}
+            ORDER BY chunk.path, source.startLine, sourceId
+            LIMIT $limit
+            """,
+            {
+                "project": project_name,
+                "all_terms": required_terms,
+                "any_terms": optional_terms,
+                "kinds": kind_filter,
+                "path_contains": path_contains_filter,
+                "include_tests": include_tests,
+                "limit": bounded_limit,
+            },
+        )
+        for row in rows:
+            if include_text:
+                row["text"] = _compact_text(row.get("text"), bounded_text_limit)
+            else:
+                row.pop("text", None)
+            row["owner"] = _compact_owner(row.get("owner"), row.get("name"))
+        return _format_response(
+            _with_result_meta(
+                {
+                    "project": project_name,
+                    "query": query,
+                    "allTerms": required_terms,
+                    "anyTerms": optional_terms,
+                    "hits": rows,
+                },
+                rows,
+                limit=bounded_limit,
+            ),
+            output_format,
+        )
+
+    def code_discovery_context(
+        self,
+        query: str,
+        project: str | None = None,
+        limit: int = 3,
+        include_tests: bool = False,
+        neighbor_limit: int = 3,
+        output_format: str = "json",
+    ) -> dict[str, Any]:
+        project_name = self.resolve_project(project)
+        bounded_limit = _bounded_limit(limit, default=3, maximum=8)
+        bounded_neighbor_limit = _bounded_limit(neighbor_limit, default=3, maximum=10)
+        search = self.code_search(
+            query=query,
+            project=project_name,
+            limit=bounded_limit,
+            include_tests=include_tests,
+            include_text=False,
+            include_keys=True,
+            output_format="json",
+        )
+        anchors = search["hits"]
+        contexts: list[dict[str, Any]] = []
+        for anchor in anchors[:bounded_limit]:
+            kind = anchor.get("kind")
+            source_id = anchor.get("sourceId")
+            context: dict[str, Any] = {"anchor": anchor}
+            if kind == "Method" and source_id:
+                method_context = self.code_method_context(
+                    source_id,
+                    project_name,
+                    method_limit=1,
+                    neighbor_limit=bounded_neighbor_limit,
+                    include_tests=include_tests,
+                    compact=True,
+                    output_format="json",
+                )
+                context["methods"] = method_context.get("methods", [])
+                context["callers"] = method_context.get("callers", [])
+                context["callees"] = method_context.get("callees", [])
+            elif kind in {"Class", "Interface", "Annotation"} and source_id:
+                type_context = self.code_lookup_type(
+                    project=project_name,
+                    fqn=source_id,
+                    include_tests=include_tests,
+                    include_members=False,
+                    member_summary=True,
+                    limit=1,
+                    compact=True,
+                    output_format="json",
+                )
+                context["types"] = type_context.get("types", [])
+            elif anchor.get("path"):
+                file_context = self.code_lookup_file(
+                    anchor["path"],
+                    project_name,
+                    limit=1,
+                    include_tests=include_tests,
+                    compact=True,
+                    output_format="json",
+                )
+                context["files"] = file_context.get("files", [])
+            contexts.append(context)
+        return _format_response(
+            _with_result_meta(
+                {
+                    "project": project_name,
+                    "query": query,
+                    "contexts": contexts,
+                },
+                contexts,
+                limit=bounded_limit,
+                extra={"neighborLimit": bounded_neighbor_limit},
             ),
             output_format,
         )
@@ -898,9 +1168,12 @@ class MemgraphIngesterTools:
         depth: int = 2,
         include_tests: bool = True,
         compact: bool = True,
+        view: str = "callers",
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
+        if view not in {"callers", "files"}:
+            raise MemgraphError("code_impact view must be 'callers' or 'files'.")
         skip_value = _bounded_skip(skip)
         limit_value = _bounded_limit(limit, default=CALL_GRAPH_LIMIT, maximum=200)
         depth_value = _bounded_depth(depth)
@@ -1046,6 +1319,26 @@ class MemgraphIngesterTools:
             for row in target_rows
         ]
         impacts = [self._format_impact_row(row, compact) for row in impact_rows]
+        if view == "files":
+            file_rows = self._impact_file_rows(targets, impacts)
+            return _format_response(
+                _with_result_meta(
+                    {
+                        "project": project_name,
+                        "fragment": signature_fragment,
+                        "depth": depth_value,
+                        "includeTests": include_tests,
+                        "targetMethods": targets,
+                        "files": file_rows,
+                    },
+                    file_rows,
+                    skip=0,
+                    limit=limit_value,
+                    total_count=len(file_rows),
+                    extra={"targetCount": len(target_rows), "view": view},
+                ),
+                output_format,
+            )
         return _format_response(
             _with_result_meta(
                 {
@@ -1060,9 +1353,66 @@ class MemgraphIngesterTools:
                 skip=skip_value,
                 limit=limit_value,
                 total_count=total_count,
-                extra={"targetCount": len(target_rows)},
+                extra={"targetCount": len(target_rows), "view": view},
             ),
             output_format,
+        )
+
+    def _impact_file_rows(
+        self,
+        targets: Sequence[dict[str, Any]],
+        impacts: Sequence[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        by_path: dict[str, dict[str, Any]] = {}
+        for target in targets:
+            path = target.get("path")
+            if not path:
+                continue
+            by_path[path] = {
+                "path": path,
+                "role": "target",
+                "minDepth": 0,
+                "callerCount": 0,
+                "testCallerCount": 0,
+                "crossPackageCount": 0,
+                "risk": "high",
+            }
+        for impact in impacts:
+            path = impact.get("path")
+            if not path:
+                continue
+            row = by_path.setdefault(
+                path,
+                {
+                    "path": path,
+                    "role": "caller",
+                    "minDepth": impact.get("depth"),
+                    "callerCount": 0,
+                    "testCallerCount": 0,
+                    "crossPackageCount": 0,
+                    "risk": "low",
+                },
+            )
+            row["minDepth"] = min(row.get("minDepth") or impact.get("depth"), impact.get("depth"))
+            row["callerCount"] += 1
+            if impact.get("isTest"):
+                row["testCallerCount"] += 1
+            if impact.get("crossesPackageBoundary"):
+                row["crossPackageCount"] += 1
+            if row["role"] != "target":
+                if row["minDepth"] == 1 and not impact.get("isTest"):
+                    row["risk"] = "high"
+                elif row["risk"] != "high" and (
+                    row["minDepth"] == 1 or impact.get("isTest")
+                ):
+                    row["risk"] = "medium"
+        return sorted(
+            by_path.values(),
+            key=lambda row: (
+                {"high": 0, "medium": 1, "low": 2}.get(row.get("risk"), 3),
+                row.get("minDepth") or 99,
+                row.get("path") or "",
+            ),
         )
 
     def _format_impact_row(self, row: dict[str, Any], compact: bool) -> dict[str, Any]:
@@ -1462,6 +1812,98 @@ class MemgraphIngesterTools:
             output_format,
         )
 
+    def code_operation_hot_paths(
+        self,
+        project: str | None = None,
+        sink_fragments: Sequence[str] | str | None = None,
+        owner_fragment: str | None = None,
+        path_contains: str | None = None,
+        limit: int = DISCOVERY_LIMIT,
+        include_tests: bool = False,
+        output_format: str = "json",
+    ) -> dict[str, Any]:
+        project_name = self.resolve_project(project)
+        bounded_limit = _bounded_limit(limit, default=DISCOVERY_LIMIT, maximum=50)
+        fragments = _normalize_lower_list(sink_fragments) or sorted(DEFAULT_OPERATION_SINKS)
+        owner_filter = (owner_fragment or "").strip().lower()
+        path_filter = (path_contains or "").strip()
+        rows = self.client.run(
+            """
+            MATCH (caller:Method {project: $project})
+              -[call:CALLS]->(sink:Method {project: $project})
+            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(caller)
+            WITH caller, sink, file, call,
+                 toLower(coalesce(sink.name, '') + ' ' + coalesce(sink.signature, '')) AS sinkText,
+                 toLower(coalesce(caller.ownerDisplayName, '') + ' '
+                         + coalesce(caller.ownerFqn, '') + ' '
+                         + coalesce(caller.signature, '')) AS callerText
+            WHERE ($include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/')
+              AND any(fragment IN $fragments WHERE sinkText CONTAINS fragment)
+              AND ($owner_fragment = '' OR callerText CONTAINS $owner_fragment)
+              AND ($path_contains = '' OR file.path CONTAINS $path_contains)
+            WITH caller, file,
+                 count(call) AS sinkCallEdges,
+                 count(DISTINCT sink) AS distinctSinks,
+                 collect(DISTINCT coalesce(sink.ownerDisplayName, sink.ownerFqn, '')
+                                  + '.' + coalesce(sink.name, ''))[..6] AS sinks,
+                 CASE
+                   WHEN caller.startLine IS NOT NULL AND caller.endLine IS NOT NULL
+                   THEN caller.endLine - caller.startLine + 1
+                   ELSE 0
+                 END AS lines
+            RETURN caller.ownerDisplayName AS owner,
+                   caller.name AS name,
+                   caller.signature AS signature,
+                   file.path AS path,
+                   caller.startLine AS startLine,
+                   caller.endLine AS endLine,
+                   lines,
+                   sinkCallEdges,
+                   distinctSinks,
+                   sinks,
+                   (sinkCallEdges * 1000 + lines) AS score
+            ORDER BY score DESC, signature
+            LIMIT $limit
+            """,
+            {
+                "project": project_name,
+                "fragments": fragments,
+                "owner_fragment": owner_filter,
+                "path_contains": path_filter,
+                "include_tests": include_tests,
+                "limit": bounded_limit,
+            },
+        )
+        for row in rows:
+            row.pop("signature", None)
+            row["riskHints"] = [
+                hint
+                for hint, active in (
+                    ("many-sink-calls", (row.get("sinkCallEdges") or 0) >= 5),
+                    ("large-method", (row.get("lines") or 0) >= 50),
+                    ("multi-sink", (row.get("distinctSinks") or 0) >= 3),
+                )
+                if active
+            ]
+        return _format_response(
+            _with_result_meta(
+                {
+                    "project": project_name,
+                    "sinkFragments": fragments,
+                    "operationHotPaths": rows,
+                },
+                rows,
+                limit=bounded_limit,
+                extra={
+                    "filters": {
+                        "ownerFragment": owner_filter,
+                        "pathContains": path_filter,
+                    },
+                },
+            ),
+            output_format,
+        )
+
     def code_quality_stats(
         self,
         project: str | None = None,
@@ -1611,6 +2053,144 @@ class MemgraphIngesterTools:
             "ancestors": ancestors,
             "interfaceImplementors": implementors,
         }
+
+    def code_test_context(
+        self,
+        test_fragment: str,
+        project: str | None = None,
+        limit: int = DISCOVERY_LIMIT,
+        production_limit: int = DISCOVERY_LIMIT,
+        output_format: str = "json",
+    ) -> dict[str, Any]:
+        project_name = self.resolve_project(project)
+        bounded_limit = _bounded_limit(limit, default=DISCOVERY_LIMIT, maximum=25)
+        bounded_production_limit = _bounded_limit(
+            production_limit,
+            default=DISCOVERY_LIMIT,
+            maximum=50,
+        )
+        owner_fragment, method_fragment, terms, min_term_matches = _test_fragment_parts(
+            test_fragment,
+        )
+        rows = self.client.run(
+            """
+            MATCH (test:Method {project: $project})
+            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(test)
+            WITH test, file,
+                 toLower(coalesce(test.signature, '') + ' ' + coalesce(test.name, '') + ' '
+                         + coalesce(file.path, '')) AS haystack
+            WITH test, file, haystack,
+                 size([term IN $terms WHERE haystack CONTAINS term]) AS termMatches
+            WHERE file.path STARTS WITH 'src/test/'
+              AND (test.signature CONTAINS $fragment
+                OR test.name CONTAINS $fragment
+                OR file.path CONTAINS $fragment
+                OR ($owner_fragment <> ''
+                    AND (test.ownerDisplayName CONTAINS $owner_fragment
+                      OR test.signature CONTAINS $owner_fragment
+                      OR file.path CONTAINS $owner_fragment))
+                OR termMatches >= $min_term_matches)
+            RETURN test.ownerDisplayName AS owner,
+                   test.name AS name,
+                   test.signature AS signature,
+                   file.path AS path,
+                   test.startLine AS startLine,
+                   test.endLine AS endLine,
+                   CASE WHEN test.signature CONTAINS $fragment OR test.name = $fragment
+                        THEN true ELSE false END AS exactish,
+                   termMatches
+            ORDER BY exactish DESC, termMatches DESC, path, startLine, signature
+            LIMIT $limit
+            """,
+            {
+                "project": project_name,
+                "fragment": test_fragment,
+                "owner_fragment": owner_fragment,
+                "terms": terms,
+                "min_term_matches": min_term_matches,
+                "limit": bounded_limit,
+            },
+        )
+        production_rows = self.client.run(
+            """
+            MATCH (test:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
+            OPTIONAL MATCH (testFile:File {project: $project})-[:DEFINES]->(test)
+            OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
+            WITH test, callee, testFile, calleeFile,
+                 toLower(coalesce(test.signature, '') + ' ' + coalesce(test.name, '') + ' '
+                         + coalesce(testFile.path, '')) AS haystack
+            WITH test, callee, testFile, calleeFile, haystack,
+                 size([term IN $terms WHERE haystack CONTAINS term]) AS termMatches
+            WHERE testFile.path STARTS WITH 'src/test/'
+              AND NOT calleeFile.path STARTS WITH 'src/test/'
+              AND (test.signature CONTAINS $fragment
+                OR test.name CONTAINS $fragment
+                OR testFile.path CONTAINS $fragment
+                OR ($owner_fragment <> ''
+                    AND (test.ownerDisplayName CONTAINS $owner_fragment
+                      OR test.signature CONTAINS $owner_fragment
+                      OR testFile.path CONTAINS $owner_fragment))
+                OR termMatches >= $min_term_matches)
+            RETURN DISTINCT callee.ownerDisplayName AS owner,
+                   callee.name AS name,
+                   callee.signature AS signature,
+                   calleeFile.path AS path,
+                   callee.startLine AS startLine,
+                   callee.endLine AS endLine,
+                   test.ownerDisplayName AS testOwner,
+                   test.name AS testName
+            ORDER BY path, startLine, signature
+            LIMIT $limit
+            """,
+            {
+                "project": project_name,
+                "fragment": test_fragment,
+                "owner_fragment": owner_fragment,
+                "terms": terms,
+                "min_term_matches": min_term_matches,
+                "limit": bounded_production_limit,
+            },
+        )
+        file_rows = self.client.run(
+            """
+            MATCH (file:File {project: $project})
+            WITH file, toLower(file.path) AS haystack
+            WHERE file.path STARTS WITH 'src/test/'
+              AND (file.path CONTAINS $fragment
+                OR ($owner_fragment <> '' AND file.path CONTAINS $owner_fragment)
+                OR size([term IN $terms WHERE haystack CONTAINS term]) >= $min_term_matches)
+            RETURN file.path AS path, file.language AS language
+            ORDER BY file.path
+            LIMIT $limit
+            """,
+            {
+                "project": project_name,
+                "fragment": test_fragment,
+                "owner_fragment": owner_fragment,
+                "terms": terms,
+                "min_term_matches": min_term_matches,
+                "limit": bounded_limit,
+            },
+        )
+        return _format_response(
+            {
+                "project": project_name,
+                "fragment": test_fragment,
+                "tests": rows,
+                "productionCallees": production_rows,
+                "testFiles": file_rows,
+                "meta": {
+                    "limit": bounded_limit,
+                    "productionLimit": bounded_production_limit,
+                    "exactMatches": sum(1 for row in rows if row.get("exactish")),
+                    "ownerFragment": owner_fragment,
+                    "methodFragment": method_fragment,
+                    "terms": terms,
+                    "minTermMatches": min_term_matches,
+                },
+            },
+            output_format,
+        )
 
     def memory_orientation(
         self,
