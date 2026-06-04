@@ -231,11 +231,7 @@ class CodeContextMixin:
         semantic_rows = list(semantic.get("hits", []))
 
         lexical_rows: list[dict[str, Any]] = []
-        lexical_terms = [
-            term
-            for term in services._identifier_terms(query)
-            if len(term) >= 4 and term.lower() not in {"with", "from", "into", "that", "this"}
-        ][:8]
+        lexical_terms = services._lexical_query_terms(query, min_length=4)[:16]
         if lexical_terms:
             lexical = self.code_text_search(
                 project=project_name,
@@ -251,11 +247,21 @@ class CodeContextMixin:
         for index, row in enumerate(semantic_rows):
             path = row.get("path")
             if path:
-                path_scores[path] = path_scores.get(path, 0.0) + 100.0 - index
+                score = float(row.get("score") or 0.0)
+                path_scores[path] = (
+                    path_scores.get(path, 0.0)
+                    + (score * 50.0)
+                    + ((bounded_anchor_limit - index) * 2.0)
+                )
         for index, row in enumerate(lexical_rows):
             path = row.get("path")
             if path:
-                path_scores[path] = path_scores.get(path, 0.0) + 25.0 - (index / 2)
+                term_matches = int(row.get("termMatches") or 1)
+                path_scores[path] = (
+                    path_scores.get(path, 0.0)
+                    + (term_matches * 12.0)
+                    + (bounded_anchor_limit - index)
+                )
 
         selected_paths = [
             path
@@ -288,13 +294,13 @@ class CodeContextMixin:
                 WHERE callerFile.path IN $paths OR calleeFile.path IN $paths
                 RETURN callerFile.path AS callerPath,
                        caller.ownerDisplayName AS callerOwner,
-                       caller.name AS caller,
+                       caller.name AS callerName,
                        caller.startLine AS callerStartLine,
                        calleeFile.path AS calleePath,
                        callee.ownerDisplayName AS calleeOwner,
-                       callee.name AS callee,
+                       callee.name AS calleeName,
                        callee.startLine AS calleeStartLine
-                ORDER BY callerFile.path, caller.startLine, calleeFile.path, callee.startLine
+                ORDER BY callerPath, callerStartLine, calleePath, calleeStartLine
                 LIMIT $limit
                 """,
                 {

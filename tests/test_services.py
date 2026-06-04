@@ -354,6 +354,7 @@ class UniversalFlowClient:
                     "path": "src/main/java/demo/Writer.java",
                     "startLine": 10,
                     "endLine": 20,
+                    "termMatches": 2,
                     "text": "stale chunks are refreshed",
                 }
             ]
@@ -552,11 +553,11 @@ class CodeContextClient:
                 {
                     "callerPath": "src/main/java/demo/Orchestrator.java",
                     "callerOwner": "Orchestrator",
-                    "caller": "run",
+                    "callerName": "run",
                     "callerStartLine": 50,
                     "calleePath": "src/main/java/demo/Writer.java",
                     "calleeOwner": "Writer",
-                    "callee": "refresh",
+                    "calleeName": "refresh",
                     "calleeStartLine": 10,
                 }
             ]
@@ -774,11 +775,27 @@ def test_code_text_search_returns_compact_hits():
         "path",
         "startLine",
         "endLine",
+        "termMatches",
     ]
     assert result["meta"]["filters"]["ragRoles"] == ["primary", "file"]
     assert client.calls[0]["parameters"]["rag_roles"] == ["primary", "file"]
+    assert client.calls[0]["parameters"]["search_terms"] == ["stale", "chunks"]
     assert result["hits"]["rows"][0][3] == "refresh"
     assert result["meta"]["format"] == "table_json"
+
+
+def test_code_text_search_tokenizes_plain_query():
+    client = UniversalFlowClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    tools.code_text_search(
+        query="stale chunks",
+        include_text=False,
+        output_format="table_json",
+    )
+
+    assert client.calls[0]["parameters"]["all_terms"] == []
+    assert client.calls[0]["parameters"]["any_terms"] == ["stale", "chunks"]
 
 
 def test_code_file_context_returns_compact_file_outlines():
@@ -851,6 +868,8 @@ def test_code_flow_context_bundles_anchors_files_and_edges():
             10,
         ]
     ]
+    assert " AS caller," not in client.calls[-1]["query"]
+    assert " AS callee," not in client.calls[-1]["query"]
     assert result["meta"]["selectedPaths"] == [
         "src/main/java/demo/Orchestrator.java",
         "src/main/java/demo/Writer.java",

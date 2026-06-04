@@ -56,6 +56,33 @@ CONTROLLED_VALUES: dict[tuple[str, str], frozenset[str]] = {
 OUTPUT_FORMATS = frozenset({"json", "table_json"})
 HOT_PATH_SECTIONS = frozenset({"largestTypes", "longestMethods", "fanIn", "fanOut"})
 DEFAULT_RAG_ROLES = ("primary", "file")
+AUTO_QUERY_STOPWORDS = frozenset(
+    {
+        "class",
+        "file",
+        "files",
+        "from",
+        "get",
+        "last",
+        "line",
+        "method",
+        "node",
+        "nodes",
+        "path",
+        "project",
+        "set",
+        "source",
+        "state",
+        "test",
+        "tests",
+        "that",
+        "this",
+        "time",
+        "type",
+        "value",
+        "with",
+    }
+)
 DISCOVERY_LIMIT = 5
 LOOKUP_LIMIT = 10
 CALL_GRAPH_LIMIT = 10
@@ -331,6 +358,14 @@ def _identifier_terms(value: str | None) -> list[str]:
         seen.add(term)
         deduped.append(term)
     return deduped
+
+
+def _lexical_query_terms(value: str | None, *, min_length: int = 3) -> list[str]:
+    return [
+        term
+        for term in _identifier_terms(value)
+        if len(term) >= min_length and term not in AUTO_QUERY_STOPWORDS
+    ]
 
 
 def _test_fragment_parts(value: str | None) -> tuple[str, str, list[str], int]:
@@ -841,9 +876,10 @@ class MemgraphIngesterTools(CodeContextMixin):
         required_terms = _normalize_lower_list(all_terms)
         optional_terms = _normalize_lower_list(any_terms)
         if query and not required_terms and not optional_terms:
-            required_terms = _normalize_lower_list(query)
+            optional_terms = _lexical_query_terms(query)
         if not required_terms and not optional_terms:
             raise MemgraphError("Provide query, all_terms, or any_terms.")
+        search_terms = required_terms + optional_terms
         kind_filter = _normalize_string_list(kinds)
         role_filter = _normalize_string_list(rag_roles)
         if not role_filter and not include_secondary:
@@ -865,9 +901,11 @@ class MemgraphIngesterTools(CodeContextMixin):
                        AND coalesce(chunk.kind, source.kind, '') = 'module' THEN 'synthetic'
                      WHEN chunk.sourceLabel = 'Method'
                        AND coalesce(chunk.startLine, source.startLine, 0) <= 0 THEN 'synthetic'
-                     ELSE 'primary'
+                   ELSE 'primary'
                    END
                  ) AS effectiveRole
+            WITH source, chunk, haystack, effectiveRole,
+                 [term IN $search_terms WHERE haystack CONTAINS term] AS matchedTerms
             WHERE ($include_tests OR chunk.path IS NULL OR NOT chunk.path STARTS WITH 'src/test/')
               AND (size($all_terms) = 0 OR all(term IN $all_terms WHERE haystack CONTAINS term))
               AND (size($any_terms) = 0 OR any(term IN $any_terms WHERE haystack CONTAINS term))
@@ -881,14 +919,16 @@ class MemgraphIngesterTools(CodeContextMixin):
                    chunk.path AS path,
                    effectiveRole AS ragRole,
                    source.startLine AS startLine,
-                   source.endLine AS endLine{text_projection}
-            ORDER BY chunk.path, source.startLine, sourceId
+                   source.endLine AS endLine,
+                   size(matchedTerms) AS termMatches{text_projection}
+            ORDER BY termMatches DESC, chunk.path, source.startLine, sourceId
             LIMIT $limit
             """,
             {
                 "project": project_name,
                 "all_terms": required_terms,
                 "any_terms": optional_terms,
+                "search_terms": search_terms,
                 "kinds": kind_filter,
                 "rag_roles": role_filter,
                 "path_contains": path_contains_filter,
