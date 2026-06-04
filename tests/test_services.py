@@ -231,6 +231,112 @@ class CallGraphClient:
         ]
 
 
+class FieldFileLookupClient:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, query, parameters=None, *, write=False):
+        self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
+        if "RETURN count(DISTINCT field) AS count" in query:
+            return [{"count": 1}]
+        if "MATCH (field:Field" in query:
+            return [
+                {
+                    "fqn": "demo.GraphWriter#cypher",
+                    "name": "cypher",
+                    "owner": "GraphWriter",
+                    "ownerFqn": "demo.GraphWriter",
+                    "startLine": 12,
+                    "endLine": 12,
+                    "files": ["src/main/java/demo/GraphWriter.java"],
+                }
+            ]
+        if "RETURN count(DISTINCT file) AS count" in query:
+            return [{"count": 1}]
+        if "MATCH (file:File" in query:
+            return [
+                {
+                    "path": "src/main/java/demo/GraphWriter.java",
+                    "language": "java",
+                    "definitionCount": 4,
+                    "chunkCount": 9,
+                }
+            ]
+        return []
+
+
+class ImpactClient:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, query, parameters=None, *, write=False):
+        self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
+        if "RETURN count(hit) AS count" in query:
+            return [{"count": 2}]
+        if "target.signature AS signature" in query:
+            return [
+                {
+                    "signature": (
+                        "demo.writer.GraphWriter.refreshCodeChunkEmbeddings(Settings, boolean)"
+                    ),
+                    "owner": "GraphWriter",
+                    "ownerFqn": "demo.writer.GraphWriter",
+                    "name": "refreshCodeChunkEmbeddings",
+                    "startLine": 620,
+                    "endLine": 623,
+                    "files": ["src/main/java/demo/writer/GraphWriter.java"],
+                }
+            ]
+        if "UNION ALL" in query:
+            return [
+                {
+                    "depth": 1,
+                    "callerSignature": "demo.ingestion.IngestionOrchestrator.refresh()",
+                    "callerOwner": "IngestionOrchestrator",
+                    "callerOwnerFqn": "demo.ingestion.IngestionOrchestrator",
+                    "callerName": "refresh",
+                    "callerStartLine": 400,
+                    "callerEndLine": 420,
+                    "callerPath": "src/main/java/demo/ingestion/IngestionOrchestrator.java",
+                    "viaSignature": None,
+                    "viaOwner": None,
+                    "viaOwnerFqn": None,
+                    "viaName": None,
+                    "viaPath": None,
+                    "targetSignature": (
+                        "demo.writer.GraphWriter.refreshCodeChunkEmbeddings(Settings, boolean)"
+                    ),
+                    "targetOwner": "GraphWriter",
+                    "targetOwnerFqn": "demo.writer.GraphWriter",
+                    "targetName": "refreshCodeChunkEmbeddings",
+                    "targetPath": "src/main/java/demo/writer/GraphWriter.java",
+                },
+                {
+                    "depth": 2,
+                    "callerSignature": "demo.IngesterCliTest.run()",
+                    "callerOwner": "IngesterCliTest",
+                    "callerOwnerFqn": "demo.IngesterCliTest",
+                    "callerName": "run",
+                    "callerStartLine": 50,
+                    "callerEndLine": 70,
+                    "callerPath": "src/test/java/demo/IngesterCliTest.java",
+                    "viaSignature": "demo.ingestion.IngestionOrchestrator.refresh()",
+                    "viaOwner": "IngestionOrchestrator",
+                    "viaOwnerFqn": "demo.ingestion.IngestionOrchestrator",
+                    "viaName": "refresh",
+                    "viaPath": "src/main/java/demo/ingestion/IngestionOrchestrator.java",
+                    "targetSignature": (
+                        "demo.writer.GraphWriter.refreshCodeChunkEmbeddings(Settings, boolean)"
+                    ),
+                    "targetOwner": "GraphWriter",
+                    "targetOwnerFqn": "demo.writer.GraphWriter",
+                    "targetName": "refreshCodeChunkEmbeddings",
+                    "targetPath": "src/main/java/demo/writer/GraphWriter.java",
+                },
+            ]
+        return []
+
+
 class OrientationClient:
     def __init__(self):
         self.calls = []
@@ -417,6 +523,19 @@ def test_registered_code_tool_defaults_are_discovery_sized():
         registered["code_lookup_methods"].parameters["properties"]["include_tests"]["default"]
         is False
     )
+    assert registered["code_lookup_field"].parameters["properties"]["limit"]["default"] == 10
+    assert (
+        registered["code_lookup_field"].parameters["properties"]["include_tests"]["default"]
+        is False
+    )
+    assert registered["code_lookup_file"].parameters["properties"]["limit"]["default"] == 10
+    assert (
+        registered["code_lookup_file"].parameters["properties"]["include_tests"]["default"]
+        is False
+    )
+    assert registered["code_impact"].parameters["properties"]["limit"]["default"] == 10
+    assert registered["code_impact"].parameters["properties"]["depth"]["default"] == 2
+    assert registered["code_impact"].parameters["properties"]["include_tests"]["default"] is True
     assert registered["code_callers"].parameters["properties"]["limit"]["default"] == 10
     assert registered["code_callers"].parameters["properties"]["include_tests"]["default"] is False
     assert registered["code_callees"].parameters["properties"]["limit"]["default"] == 10
@@ -888,6 +1007,97 @@ def test_code_lookup_methods_can_return_table_json():
         "cols": ["owner", "name", "path", "startLine", "endLine"],
         "rows": [["GraphWriter", "upsertFile", "src/main/java/demo/GraphWriter.java", 10, 20]],
     }
+    assert result["meta"]["format"] == "table_json"
+
+
+def test_code_lookup_field_can_return_table_json():
+    client = FieldFileLookupClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_lookup_field("cypher", compact=True, output_format="table_json")
+
+    assert result["fields"] == {
+        "cols": ["owner", "name", "fqn", "path", "startLine", "endLine"],
+        "rows": [
+            [
+                "GraphWriter",
+                "cypher",
+                "demo.GraphWriter#cypher",
+                "src/main/java/demo/GraphWriter.java",
+                12,
+                12,
+            ]
+        ],
+    }
+    assert result["meta"]["totalCount"] == 1
+    assert result["meta"]["format"] == "table_json"
+
+
+def test_code_lookup_file_can_return_table_json():
+    client = FieldFileLookupClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_lookup_file("GraphWriter.java", compact=True, output_format="table_json")
+
+    assert result["files"] == {
+        "cols": ["path", "language", "definitionCount", "chunkCount"],
+        "rows": [["src/main/java/demo/GraphWriter.java", "java", 4, 9]],
+    }
+    assert result["meta"]["totalCount"] == 1
+    assert result["meta"]["format"] == "table_json"
+
+
+def test_code_impact_returns_targets_and_boundary_flags():
+    client = ImpactClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_impact("refreshCodeChunkEmbeddings", output_format="table_json")
+
+    assert result["targetMethods"] == {
+        "cols": ["owner", "name", "signature", "path", "startLine", "endLine"],
+        "rows": [
+            [
+                "GraphWriter",
+                "refreshCodeChunkEmbeddings",
+                "demo.writer.GraphWriter.refreshCodeChunkEmbeddings(Settings, boolean)",
+                "src/main/java/demo/writer/GraphWriter.java",
+                620,
+                623,
+            ]
+        ],
+    }
+    assert result["impacts"]["cols"] == [
+        "depth",
+        "owner",
+        "name",
+        "path",
+        "startLine",
+        "endLine",
+        "viaOwner",
+        "viaName",
+        "targetOwner",
+        "targetName",
+        "isTest",
+        "crossesFileBoundary",
+        "crossesPackageBoundary",
+    ]
+    assert result["impacts"]["rows"][0] == [
+        1,
+        "IngestionOrchestrator",
+        "refresh",
+        "src/main/java/demo/ingestion/IngestionOrchestrator.java",
+        400,
+        420,
+        None,
+        None,
+        "GraphWriter",
+        "refreshCodeChunkEmbeddings",
+        False,
+        True,
+        True,
+    ]
+    assert result["impacts"]["rows"][1][10:] == [True, True, True]
+    assert result["meta"]["targetCount"] == 1
     assert result["meta"]["format"] == "table_json"
 
 

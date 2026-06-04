@@ -19,8 +19,11 @@ Code graph tools:
 - `code_search`: CodeChunk vector search for broad discovery; defaults to 5 non-test, deduped, range-first hits and omits text.
 - `code_lookup_type`: exact class/interface/annotation lookup; test code and member expansion are opt-in.
 - `code_lookup_methods`: exact method lookup with source ranges; defaults to 10 compact owner/name/path rows.
+- `code_lookup_field`: exact field/constant lookup by FQN or name fragment; defaults to compact owner/name/FQN/path rows.
+- `code_lookup_file`: indexed file/resource lookup by path fragment with definition and RAG chunk counts.
 - `code_callers`, `code_callees`: compact, paginated, non-test, range-first call graph lookups; default first page is 10 rows.
 - `code_method_context`: bundled exact method lookup plus caller and callee context; use instead of separate lookup/callers/callees calls while tracing one target.
+- `code_impact`: refactor blast-radius lookup for matching method signatures; returns target methods plus depth-1/depth-2 callers, test flags, and file/package boundary flags.
 - `code_hierarchy`: class ancestry, children, interfaces, and interface implementors.
 
 Memory tools:
@@ -171,6 +174,9 @@ you need graph-wide baselines. Compact method/search/call-graph rows are range-f
 signatures; request non-compact output only when signatures or modifiers are needed. Use
 `code_method_context` when tracing one method so one MCP call replaces lookup plus callers plus
 callees. Most code tools exclude `src/test/` by default; pass `include_tests=true` only for test
-coverage or test-specific questions. Use `memory_orientation(compact=true)` for status checks and
-memory write tools for task lifecycle changes and CodeRef links so derived MemoryChunks stay
-refreshable.
+coverage or test-specific questions. Use `code_impact` first for method signature changes and
+blast-radius review; it includes tests by default and flags file/package boundaries. Use
+`code_lookup_field` for constants and member variables, and `code_lookup_file` for indexed source,
+resource, template, and Cypher path discovery before falling back to text search. Use
+`memory_orientation(compact=true)` for status checks and memory write tools for task lifecycle
+changes and CodeRef links so derived MemoryChunks stay refreshable.

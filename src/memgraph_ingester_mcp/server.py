@@ -118,6 +118,74 @@ def create_server(
         )
 
     @mcp.tool()
+    def code_lookup_field(
+        field_fragment: str,
+        project: str | None = None,
+        skip: int = 0,
+        limit: int = LOOKUP_LIMIT,
+        include_tests: bool = False,
+        compact: bool = True,
+        format: str = "table_json",
+    ) -> dict[str, Any]:
+        """Find fields by FQN/name fragment and return source-linked rows."""
+
+        return tools.code_lookup_field(
+            field_fragment=field_fragment,
+            project=project,
+            skip=skip,
+            limit=limit,
+            include_tests=include_tests,
+            compact=compact,
+            output_format=format,
+        )
+
+    @mcp.tool()
+    def code_lookup_file(
+        path_fragment: str,
+        project: str | None = None,
+        skip: int = 0,
+        limit: int = LOOKUP_LIMIT,
+        include_tests: bool = False,
+        compact: bool = True,
+        format: str = "table_json",
+    ) -> dict[str, Any]:
+        """Find indexed files by path fragment with definition and chunk counts."""
+
+        return tools.code_lookup_file(
+            path_fragment=path_fragment,
+            project=project,
+            skip=skip,
+            limit=limit,
+            include_tests=include_tests,
+            compact=compact,
+            output_format=format,
+        )
+
+    @mcp.tool()
+    def code_impact(
+        signature_fragment: str,
+        project: str | None = None,
+        skip: int = 0,
+        limit: int = CALL_GRAPH_LIMIT,
+        depth: int = 2,
+        include_tests: bool = True,
+        compact: bool = True,
+        format: str = "table_json",
+    ) -> dict[str, Any]:
+        """Map refactor impact for matching methods through direct and one-level callers."""
+
+        return tools.code_impact(
+            signature_fragment=signature_fragment,
+            project=project,
+            skip=skip,
+            limit=limit,
+            depth=depth,
+            include_tests=include_tests,
+            compact=compact,
+            output_format=format,
+        )
+
+    @mcp.tool()
     def code_callers(
         callee_fragment: str,
         project: str | None = None,

@@ -83,6 +83,22 @@ def _compact_owner(owner: str | None, name: str | None) -> str | None:
     return owner
 
 
+def _package_name(owner_fqn: str | None) -> str | None:
+    if not owner_fqn or "." not in owner_fqn:
+        return None
+    return owner_fqn.rsplit(".", 1)[0]
+
+
+def _is_test_path(path: str | None) -> bool:
+    return bool(path and (path.startswith("src/test/") or "/test/" in path))
+
+
+def _bounded_depth(depth: int) -> int:
+    if depth <= 1:
+        return 1
+    return min(depth, 2)
+
+
 def _normalize_output_format(output_format: str | None) -> str:
     if output_format is None:
         return "json"
@@ -705,6 +721,381 @@ class MemgraphIngesterTools:
             ),
             output_format,
         )
+
+    def code_lookup_field(
+        self,
+        field_fragment: str,
+        project: str | None = None,
+        skip: int = 0,
+        limit: int = LOOKUP_LIMIT,
+        include_tests: bool = False,
+        compact: bool = True,
+        output_format: str = "json",
+    ) -> dict[str, Any]:
+        project_name = self.resolve_project(project)
+        skip_value = _bounded_skip(skip)
+        limit_value = _bounded_limit(limit, default=LOOKUP_LIMIT, maximum=200)
+        projection = (
+            """
+                   field.fqn AS fqn, field.name AS name,
+                   coalesce(owner.ownerDisplayName, owner.name, owner.fqn) AS owner,
+                   owner.fqn AS ownerFqn,
+                   field.startLine AS startLine, field.endLine AS endLine,
+                   files, field.fqn AS sortKey
+            """
+            if compact
+            else """
+                   field.fqn AS fqn, field.name AS name, field.type AS type,
+                   field.visibility AS visibility, field.isStatic AS isStatic,
+                   field.kind AS kind, field.language AS language,
+                   owner.fqn AS ownerFqn,
+                   coalesce(owner.ownerDisplayName, owner.name, owner.fqn) AS ownerDisplayName,
+                   field.startLine AS startLine, field.endLine AS endLine, files
+            """
+        )
+        rows = self.client.run(
+            f"""
+            MATCH (field:Field {{project: $project}})
+            WHERE field.fqn CONTAINS $fragment OR field.name = $fragment
+            OPTIONAL MATCH (owner {{project: $project}})-[:DECLARES]->(field)
+            WHERE owner:Class OR owner:Interface OR owner:Annotation
+            OPTIONAL MATCH (file:File {{project: $project}})-[:DEFINES]->(field)
+            WITH field, owner, file
+            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
+            WITH field, owner, collect(DISTINCT file.path) AS files
+            RETURN {projection.strip()}
+            ORDER BY __ORDER_BY__
+            SKIP $skip
+            LIMIT $limit
+            """.replace("__ORDER_BY__", "sortKey" if compact else "fqn"),
+            {
+                "project": project_name,
+                "fragment": field_fragment,
+                "skip": skip_value,
+                "limit": limit_value,
+                "include_tests": include_tests,
+            },
+        )
+        if compact:
+            rows = [
+                {
+                    "owner": row.get("owner"),
+                    "name": row.get("name"),
+                    "fqn": row.get("fqn"),
+                    "path": _first(row.get("files")),
+                    "startLine": row.get("startLine"),
+                    "endLine": row.get("endLine"),
+                }
+                for row in rows
+            ]
+        count_rows = self.client.run(
+            """
+            MATCH (field:Field {project: $project})
+            WHERE field.fqn CONTAINS $fragment OR field.name = $fragment
+            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(field)
+            WITH field, file
+            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
+            RETURN count(DISTINCT field) AS count
+            """,
+            {
+                "project": project_name,
+                "fragment": field_fragment,
+                "include_tests": include_tests,
+            },
+        )
+        total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
+        return _format_response(
+            _with_result_meta(
+                {"project": project_name, "fields": rows},
+                rows,
+                skip=skip_value,
+                limit=limit_value,
+                total_count=total_count,
+            ),
+            output_format,
+        )
+
+    def code_lookup_file(
+        self,
+        path_fragment: str,
+        project: str | None = None,
+        skip: int = 0,
+        limit: int = LOOKUP_LIMIT,
+        include_tests: bool = False,
+        compact: bool = True,
+        output_format: str = "json",
+    ) -> dict[str, Any]:
+        project_name = self.resolve_project(project)
+        skip_value = _bounded_skip(skip)
+        limit_value = _bounded_limit(limit, default=LOOKUP_LIMIT, maximum=200)
+        projection = (
+            """
+                   file.path AS path, file.language AS language,
+                   definitionCount, chunkCount
+            """
+            if compact
+            else """
+                   file.path AS path, file.language AS language,
+                   file.lastModified AS lastModified,
+                   file.retainedSourceToken AS retainedSourceToken,
+                   definitionCount, chunkCount
+            """
+        )
+        rows = self.client.run(
+            f"""
+            MATCH (file:File {{project: $project}})
+            WHERE file.path CONTAINS $fragment
+              AND ($include_tests OR NOT file.path STARTS WITH 'src/test/')
+            OPTIONAL MATCH (file)-[:DEFINES]->(definition {{project: $project}})
+            WITH file, count(DISTINCT definition) AS definitionCount
+            OPTIONAL MATCH (chunk:CodeChunk {{project: $project}})
+            WHERE chunk.path = file.path
+            WITH file, definitionCount, count(DISTINCT chunk) AS chunkCount
+            RETURN {projection.strip()}
+            ORDER BY file.path
+            SKIP $skip
+            LIMIT $limit
+            """,
+            {
+                "project": project_name,
+                "fragment": path_fragment,
+                "skip": skip_value,
+                "limit": limit_value,
+                "include_tests": include_tests,
+            },
+        )
+        count_rows = self.client.run(
+            """
+            MATCH (file:File {project: $project})
+            WHERE file.path CONTAINS $fragment
+              AND ($include_tests OR NOT file.path STARTS WITH 'src/test/')
+            RETURN count(DISTINCT file) AS count
+            """,
+            {
+                "project": project_name,
+                "fragment": path_fragment,
+                "include_tests": include_tests,
+            },
+        )
+        total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
+        return _format_response(
+            _with_result_meta(
+                {"project": project_name, "files": rows},
+                rows,
+                skip=skip_value,
+                limit=limit_value,
+                total_count=total_count,
+            ),
+            output_format,
+        )
+
+    def code_impact(
+        self,
+        signature_fragment: str,
+        project: str | None = None,
+        skip: int = 0,
+        limit: int = CALL_GRAPH_LIMIT,
+        depth: int = 2,
+        include_tests: bool = True,
+        compact: bool = True,
+        output_format: str = "json",
+    ) -> dict[str, Any]:
+        project_name = self.resolve_project(project)
+        skip_value = _bounded_skip(skip)
+        limit_value = _bounded_limit(limit, default=CALL_GRAPH_LIMIT, maximum=200)
+        depth_value = _bounded_depth(depth)
+        params = {
+            "project": project_name,
+            "fragment": signature_fragment,
+            "skip": skip_value,
+            "limit": limit_value,
+            "depth": depth_value,
+            "include_tests": include_tests,
+        }
+        target_rows = self.client.run(
+            """
+            MATCH (target:Method {project: $project})
+            WHERE target.signature CONTAINS $fragment
+            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(target)
+            WITH target, collect(DISTINCT file.path) AS files
+            WHERE $include_tests
+               OR files = []
+               OR any(path IN files WHERE NOT path STARTS WITH 'src/test/')
+            RETURN target.signature AS signature,
+                   target.ownerDisplayName AS owner,
+                   target.ownerFqn AS ownerFqn,
+                   target.name AS name,
+                   target.startLine AS startLine,
+                   target.endLine AS endLine,
+                   files
+            ORDER BY signature
+            LIMIT $limit
+            """,
+            params,
+        )
+        impact_rows = self.client.run(
+            """
+            MATCH (caller:Method {project: $project})-[:CALLS]->(target:Method {project: $project})
+            WHERE target.signature CONTAINS $fragment
+            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
+            OPTIONAL MATCH (targetFile:File {project: $project})-[:DEFINES]->(target)
+            WITH caller, target, callerFile, targetFile
+            WHERE $include_tests
+               OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
+               AND (targetFile.path IS NULL OR NOT targetFile.path STARTS WITH 'src/test/'))
+            RETURN DISTINCT 1 AS depth,
+                   caller.signature AS callerSignature,
+                   caller.ownerDisplayName AS callerOwner,
+                   caller.ownerFqn AS callerOwnerFqn,
+                   caller.name AS callerName,
+                   caller.startLine AS callerStartLine,
+                   caller.endLine AS callerEndLine,
+                   callerFile.path AS callerPath,
+                   null AS viaSignature,
+                   null AS viaOwner,
+                   null AS viaOwnerFqn,
+                   null AS viaName,
+                   null AS viaPath,
+                   target.signature AS targetSignature,
+                   target.ownerDisplayName AS targetOwner,
+                   target.ownerFqn AS targetOwnerFqn,
+                   target.name AS targetName,
+                   targetFile.path AS targetPath
+            UNION ALL
+            MATCH (caller:Method {project: $project})
+              -[:CALLS]->(via:Method {project: $project})
+              -[:CALLS]->(target:Method {project: $project})
+            WHERE $depth >= 2 AND target.signature CONTAINS $fragment
+            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
+            OPTIONAL MATCH (viaFile:File {project: $project})-[:DEFINES]->(via)
+            OPTIONAL MATCH (targetFile:File {project: $project})-[:DEFINES]->(target)
+            WITH caller, via, target, callerFile, viaFile, targetFile
+            WHERE $include_tests
+               OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
+               AND (viaFile.path IS NULL OR NOT viaFile.path STARTS WITH 'src/test/')
+               AND (targetFile.path IS NULL OR NOT targetFile.path STARTS WITH 'src/test/'))
+            RETURN DISTINCT 2 AS depth,
+                   caller.signature AS callerSignature,
+                   caller.ownerDisplayName AS callerOwner,
+                   caller.ownerFqn AS callerOwnerFqn,
+                   caller.name AS callerName,
+                   caller.startLine AS callerStartLine,
+                   caller.endLine AS callerEndLine,
+                   callerFile.path AS callerPath,
+                   via.signature AS viaSignature,
+                   via.ownerDisplayName AS viaOwner,
+                   via.ownerFqn AS viaOwnerFqn,
+                   via.name AS viaName,
+                   viaFile.path AS viaPath,
+                   target.signature AS targetSignature,
+                   target.ownerDisplayName AS targetOwner,
+                   target.ownerFqn AS targetOwnerFqn,
+                   target.name AS targetName,
+                   targetFile.path AS targetPath
+            ORDER BY depth, callerSignature, viaSignature, targetSignature
+            SKIP $skip
+            LIMIT $limit
+            """,
+            params,
+        )
+        count_rows = self.client.run(
+            """
+            CALL {
+              MATCH (caller:Method {project: $project})
+                -[:CALLS]->(target:Method {project: $project})
+              WHERE target.signature CONTAINS $fragment
+              OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
+              OPTIONAL MATCH (targetFile:File {project: $project})-[:DEFINES]->(target)
+              WITH callerFile, targetFile
+              WHERE $include_tests
+                 OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
+                 AND (targetFile.path IS NULL OR NOT targetFile.path STARTS WITH 'src/test/'))
+              RETURN 1 AS hit
+              UNION ALL
+              MATCH (caller:Method {project: $project})
+                -[:CALLS]->(via:Method {project: $project})
+                -[:CALLS]->(target:Method {project: $project})
+              WHERE $depth >= 2 AND target.signature CONTAINS $fragment
+              OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
+              OPTIONAL MATCH (viaFile:File {project: $project})-[:DEFINES]->(via)
+              OPTIONAL MATCH (targetFile:File {project: $project})-[:DEFINES]->(target)
+              WITH callerFile, viaFile, targetFile
+              WHERE $include_tests
+                 OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
+                 AND (viaFile.path IS NULL OR NOT viaFile.path STARTS WITH 'src/test/')
+                 AND (targetFile.path IS NULL OR NOT targetFile.path STARTS WITH 'src/test/'))
+              RETURN 1 AS hit
+            }
+            RETURN count(hit) AS count
+            """,
+            params,
+        )
+        total_count = count_rows[0].get("count", 0) if count_rows else len(impact_rows)
+
+        targets = [
+            {
+                "owner": row.get("owner"),
+                "name": row.get("name") or _method_name(row.get("signature")),
+                "signature": row.get("signature"),
+                "path": _first(row.get("files")),
+                "startLine": row.get("startLine"),
+                "endLine": row.get("endLine"),
+            }
+            if compact
+            else row
+            for row in target_rows
+        ]
+        impacts = [self._format_impact_row(row, compact) for row in impact_rows]
+        return _format_response(
+            _with_result_meta(
+                {
+                    "project": project_name,
+                    "fragment": signature_fragment,
+                    "depth": depth_value,
+                    "includeTests": include_tests,
+                    "targetMethods": targets,
+                    "impacts": impacts,
+                },
+                impacts,
+                skip=skip_value,
+                limit=limit_value,
+                total_count=total_count,
+                extra={"targetCount": len(target_rows)},
+            ),
+            output_format,
+        )
+
+    def _format_impact_row(self, row: dict[str, Any], compact: bool) -> dict[str, Any]:
+        caller_path = row.get("callerPath")
+        target_path = row.get("targetPath")
+        caller_package = _package_name(row.get("callerOwnerFqn"))
+        target_package = _package_name(row.get("targetOwnerFqn"))
+        enriched = dict(row)
+        enriched["isTest"] = _is_test_path(caller_path)
+        enriched["crossesFileBoundary"] = (
+            caller_path != target_path if caller_path and target_path else None
+        )
+        enriched["crossesPackageBoundary"] = (
+            caller_package != target_package if caller_package and target_package else None
+        )
+        if not compact:
+            return enriched
+        return {
+            "depth": enriched.get("depth"),
+            "owner": enriched.get("callerOwner"),
+            "name": enriched.get("callerName") or _method_name(enriched.get("callerSignature")),
+            "path": caller_path,
+            "startLine": enriched.get("callerStartLine"),
+            "endLine": enriched.get("callerEndLine"),
+            "viaOwner": enriched.get("viaOwner"),
+            "viaName": enriched.get("viaName") or _method_name(enriched.get("viaSignature")),
+            "targetOwner": enriched.get("targetOwner"),
+            "targetName": enriched.get("targetName")
+            or _method_name(enriched.get("targetSignature")),
+            "isTest": enriched.get("isTest"),
+            "crossesFileBoundary": enriched.get("crossesFileBoundary"),
+            "crossesPackageBoundary": enriched.get("crossesPackageBoundary"),
+        }
 
     def code_callers(
         self,
