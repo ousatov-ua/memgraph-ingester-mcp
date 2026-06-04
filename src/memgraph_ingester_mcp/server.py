@@ -57,6 +57,8 @@ def create_server(
         path_contains: str | None = None,
         owner_fragment: str | None = None,
         min_score: float = 0.0,
+        include_secondary: bool = False,
+        rag_roles: list[str] | None = None,
         include_keys: bool = False,
         format: str = "table_json",
     ) -> dict[str, Any]:
@@ -75,6 +77,8 @@ def create_server(
             path_contains=path_contains,
             owner_fragment=owner_fragment,
             min_score=min_score,
+            include_secondary=include_secondary,
+            rag_roles=rag_roles,
             include_keys=include_keys,
             output_format=format,
         )
@@ -90,6 +94,8 @@ def create_server(
         include_text: bool = False,
         text_limit: int = 160,
         kinds: list[str] | None = None,
+        include_secondary: bool = False,
+        rag_roles: list[str] | None = None,
         path_contains: str | None = None,
         format: str = "table_json",
     ) -> dict[str, Any]:
@@ -105,6 +111,8 @@ def create_server(
             include_text=include_text,
             text_limit=text_limit,
             kinds=kinds,
+            include_secondary=include_secondary,
+            rag_roles=rag_roles,
             path_contains=path_contains,
             output_format=format,
         )

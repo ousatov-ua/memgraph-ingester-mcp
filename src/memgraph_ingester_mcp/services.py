@@ -36,6 +36,7 @@ CONTROLLED_VALUES: dict[tuple[str, str], frozenset[str]] = {
 
 OUTPUT_FORMATS = frozenset({"json", "table_json"})
 HOT_PATH_SECTIONS = frozenset({"largestTypes", "longestMethods", "fanIn", "fanOut"})
+DEFAULT_RAG_ROLES = ("primary", "file")
 DISCOVERY_LIMIT = 5
 LOOKUP_LIMIT = 10
 CALL_GRAPH_LIMIT = 10
@@ -489,13 +490,21 @@ class MemgraphIngesterTools:
         path_contains: str | None = None,
         owner_fragment: str | None = None,
         min_score: float = 0.0,
+        include_secondary: bool = False,
+        rag_roles: Sequence[str] | str | None = None,
         include_keys: bool = False,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         bounded_limit = _bounded_limit(limit, default=DISCOVERY_LIMIT, maximum=25)
         bounded_text_limit = _bounded_text_limit(text_limit)
-        fetch_limit = min(bounded_limit * 3, 75) if dedupe_by_source else bounded_limit
+        role_filter = _normalize_string_list(rag_roles)
+        if not role_filter and not include_secondary:
+            role_filter = list(DEFAULT_RAG_ROLES)
+        fetch_multiplier = 6 if role_filter else 3
+        fetch_limit = (
+            min(bounded_limit * fetch_multiplier, 150) if dedupe_by_source else bounded_limit
+        )
         return_projection = (
             """
                    coalesce(chunk.sourceLabel, labels(source)[0]) AS kind,
@@ -503,6 +512,7 @@ class MemgraphIngesterTools:
                    coalesce(source.ownerDisplayName, source.ownerFqn, chunk.ownerFqn) AS owner,
                    coalesce(source.name, chunk.signature, chunk.sourceId) AS name,
                    chunk.path AS path,
+                   effectiveRole AS ragRole,
                    source.startLine AS startLine, source.endLine AS endLine,
                    round(similarity * 10000) / 10000 AS score,
                    chunk.text AS text
@@ -514,6 +524,7 @@ class MemgraphIngesterTools:
                    coalesce(source.ownerDisplayName, source.ownerFqn, chunk.ownerFqn) AS owner,
                    coalesce(source.name, chunk.signature, chunk.sourceId) AS name,
                    chunk.path AS path,
+                   effectiveRole AS ragRole,
                    source.startLine AS startLine, source.endLine AS endLine,
                    round(similarity * 10000) / 10000 AS score
             """
@@ -527,6 +538,19 @@ class MemgraphIngesterTools:
             WHERE chunk.project = $project
               AND ($include_tests OR chunk.path IS NULL OR NOT chunk.path STARTS WITH 'src/test/')
             MATCH (source {project: $project})-[:HAS_RAG_CHUNK]->(chunk)
+            WITH chunk, source, similarity,
+                 coalesce(chunk.ragRole,
+                   CASE
+                     WHEN chunk.sourceLabel = 'Field' THEN 'secondary'
+                     WHEN chunk.sourceLabel = 'File' THEN 'file'
+                     WHEN chunk.sourceLabel = 'Class'
+                       AND coalesce(chunk.kind, source.kind, '') = 'module' THEN 'synthetic'
+                     WHEN chunk.sourceLabel = 'Method'
+                       AND coalesce(chunk.startLine, source.startLine, 0) <= 0 THEN 'synthetic'
+                     ELSE 'primary'
+                   END
+                 ) AS effectiveRole
+            WHERE size($rag_roles) = 0 OR effectiveRole IN $rag_roles
             RETURN __RETURN_PROJECTION__
             ORDER BY similarity DESC
             """.replace("__RETURN_PROJECTION__", return_projection.strip())
@@ -537,6 +561,7 @@ class MemgraphIngesterTools:
                 "query": query,
                 "limit": fetch_limit,
                 "include_tests": include_tests,
+                "rag_roles": role_filter,
             },
         )
         kind_filter = frozenset(_normalize_string_list(kinds))
@@ -578,6 +603,7 @@ class MemgraphIngesterTools:
                 row.pop("text", None)
             if not include_keys:
                 row.pop("sourceId", None)
+                row.pop("ragRole", None)
             row["owner"] = _compact_owner(row.get("owner"), row.get("name"))
         return _format_response(
             _with_result_meta(
@@ -596,6 +622,8 @@ class MemgraphIngesterTools:
                         "pathContains": path_contains_filter,
                         "ownerFragment": owner_filter,
                         "minScore": min_score,
+                        "includeSecondary": include_secondary,
+                        "ragRoles": role_filter,
                     },
                 },
             ),
@@ -613,6 +641,8 @@ class MemgraphIngesterTools:
         include_text: bool = False,
         text_limit: int = 160,
         kinds: Sequence[str] | str | None = None,
+        include_secondary: bool = False,
+        rag_roles: Sequence[str] | str | None = None,
         path_contains: str | None = None,
         output_format: str = "json",
     ) -> dict[str, Any]:
@@ -626,6 +656,9 @@ class MemgraphIngesterTools:
         if not required_terms and not optional_terms:
             raise MemgraphError("Provide query, all_terms, or any_terms.")
         kind_filter = _normalize_string_list(kinds)
+        role_filter = _normalize_string_list(rag_roles)
+        if not role_filter and not include_secondary:
+            role_filter = list(DEFAULT_RAG_ROLES)
         path_contains_filter = (path_contains or "").strip()
         text_projection = ", chunk.text AS text" if include_text else ""
         rows = self.client.run(
@@ -634,17 +667,30 @@ class MemgraphIngesterTools:
               -[:HAS_RAG_CHUNK]->(chunk:CodeChunk {{project: $project}})
             WITH source, chunk,
                  toLower(coalesce(chunk.text, '') + ' ' + coalesce(chunk.path, '') + ' '
-                         + coalesce(chunk.sourceId, '')) AS haystack
+                         + coalesce(chunk.sourceId, '')) AS haystack,
+                 coalesce(chunk.ragRole,
+                   CASE
+                     WHEN chunk.sourceLabel = 'Field' THEN 'secondary'
+                     WHEN chunk.sourceLabel = 'File' THEN 'file'
+                     WHEN chunk.sourceLabel = 'Class'
+                       AND coalesce(chunk.kind, source.kind, '') = 'module' THEN 'synthetic'
+                     WHEN chunk.sourceLabel = 'Method'
+                       AND coalesce(chunk.startLine, source.startLine, 0) <= 0 THEN 'synthetic'
+                     ELSE 'primary'
+                   END
+                 ) AS effectiveRole
             WHERE ($include_tests OR chunk.path IS NULL OR NOT chunk.path STARTS WITH 'src/test/')
               AND (size($all_terms) = 0 OR all(term IN $all_terms WHERE haystack CONTAINS term))
               AND (size($any_terms) = 0 OR any(term IN $any_terms WHERE haystack CONTAINS term))
               AND (size($kinds) = 0 OR coalesce(chunk.sourceLabel, labels(source)[0]) IN $kinds)
+              AND (size($rag_roles) = 0 OR effectiveRole IN $rag_roles)
               AND ($path_contains = '' OR chunk.path CONTAINS $path_contains)
             RETURN coalesce(chunk.sourceLabel, labels(source)[0]) AS kind,
                    chunk.sourceId AS sourceId,
                    coalesce(source.ownerDisplayName, source.ownerFqn, chunk.ownerFqn) AS owner,
                    coalesce(source.name, chunk.signature, chunk.sourceId) AS name,
                    chunk.path AS path,
+                   effectiveRole AS ragRole,
                    source.startLine AS startLine,
                    source.endLine AS endLine{text_projection}
             ORDER BY chunk.path, source.startLine, sourceId
@@ -655,6 +701,7 @@ class MemgraphIngesterTools:
                 "all_terms": required_terms,
                 "any_terms": optional_terms,
                 "kinds": kind_filter,
+                "rag_roles": role_filter,
                 "path_contains": path_contains_filter,
                 "include_tests": include_tests,
                 "limit": bounded_limit,
@@ -665,6 +712,7 @@ class MemgraphIngesterTools:
                 row["text"] = _compact_text(row.get("text"), bounded_text_limit)
             else:
                 row.pop("text", None)
+            row.pop("ragRole", None)
             row["owner"] = _compact_owner(row.get("owner"), row.get("name"))
         return _format_response(
             _with_result_meta(
@@ -677,6 +725,14 @@ class MemgraphIngesterTools:
                 },
                 rows,
                 limit=bounded_limit,
+                extra={
+                    "filters": {
+                        "kinds": kind_filter,
+                        "includeSecondary": include_secondary,
+                        "ragRoles": role_filter,
+                        "pathContains": path_contains_filter,
+                    },
+                },
             ),
             output_format,
         )

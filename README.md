@@ -16,8 +16,8 @@ Code graph tools:
 - `code_orientation`: compact package/type/call overview; pass `sections` to keep it focused.
 - `code_quality_stats`: graph-wide code quality and quantity metrics; defaults to non-test code and a 5-row first page.
 - `code_hot_paths`: compact hot-path candidates from size and call graph metrics; defaults to 5 owner/name rows per selected section.
-- `code_search`: CodeChunk vector search for broad discovery; defaults to 5 non-test, deduped, range-first hits and omits text/source keys unless requested; supports compact filters.
-- `code_text_search`: lexical search over indexed chunk text/path/source ids for concrete-term discovery.
+- `code_search`: CodeChunk vector search for broad discovery; defaults to 5 non-test, deduped, primary/file-role hits and omits text/source keys unless requested; supports compact filters.
+- `code_text_search`: lexical search over indexed chunk text/path/source ids for concrete-term discovery; defaults to primary/file-role hits.
 - `code_discovery_context`: semantic discovery plus bounded exact/caller/callee/file context in one compact response.
 - `code_lookup_type`: exact class/interface/annotation lookup; test code and member expansion are opt-in.
 - `code_lookup_methods`: exact method lookup with source ranges; defaults to 10 compact owner/name/path rows.
@@ -178,8 +178,10 @@ you need graph-wide baselines. Compact method/search/call-graph rows are range-f
 signatures; request non-compact output only when signatures or modifiers are needed. Use
 `code_method_context` when tracing one method so one MCP call replaces lookup plus callers plus
 callees. Use `code_discovery_context` for concept-first work before separate RAG/refine loops, and
-use `code_text_search` when concrete terms are likely present. Most code tools exclude `src/test/`
-by default; pass `include_tests=true` only for test coverage or test-specific questions. Use
+use `code_text_search` when concrete terms are likely present. RAG searches default to primary/file
+chunks; pass `include_secondary=true` or explicit `rag_roles` only when searching constants, record
+components, accessors, or synthetic/module chunks. Most code tools exclude `src/test/` by default;
+pass `include_tests=true` only for test coverage or test-specific questions. Use
 `code_impact` first for method signature changes and blast-radius review; it includes tests by
 default and flags file/package boundaries. Use `code_operation_hot_paths` alongside
 `code_hot_paths` for performance/write-path audits; pass `owner_fragment` or `path_contains` when

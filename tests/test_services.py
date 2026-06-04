@@ -525,6 +525,7 @@ def test_code_search_omits_text_and_dedupes_by_default():
     assert len(result["hits"]) == 1
     assert "text" not in result["hits"][0]
     assert "chunk.text AS text" not in client.calls[0]["query"]
+    assert client.calls[0]["parameters"]["rag_roles"] == ["primary", "file"]
 
 
 def test_code_search_can_include_bounded_text():
@@ -582,6 +583,18 @@ def test_code_search_can_include_keys_and_filters():
     assert "sourceId" in result["hits"]["cols"]
     assert result["meta"]["includeKeys"] is True
     assert result["meta"]["filters"]["kinds"] == ["Method"]
+    assert result["meta"]["filters"]["ragRoles"] == ["primary", "file"]
+
+
+def test_code_search_can_include_secondary_chunks():
+    client = SearchClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_search("hot path", include_secondary=True)
+
+    assert result["meta"]["filters"]["includeSecondary"] is True
+    assert result["meta"]["filters"]["ragRoles"] == []
+    assert client.calls[0]["parameters"]["rag_roles"] == []
 
 
 def test_code_text_search_returns_compact_hits():
@@ -603,6 +616,8 @@ def test_code_text_search_returns_compact_hits():
         "startLine",
         "endLine",
     ]
+    assert result["meta"]["filters"]["ragRoles"] == ["primary", "file"]
+    assert client.calls[0]["parameters"]["rag_roles"] == ["primary", "file"]
     assert result["hits"]["rows"][0][3] == "refresh"
     assert result["meta"]["format"] == "table_json"
 
@@ -621,6 +636,15 @@ def test_registered_code_tool_defaults_are_discovery_sized():
     assert registered["code_search"].parameters["properties"]["limit"]["default"] == 5
     assert registered["code_search"].parameters["properties"]["include_tests"]["default"] is False
     assert registered["code_search"].parameters["properties"]["include_keys"]["default"] is False
+    assert (
+        registered["code_search"].parameters["properties"]["include_secondary"]["default"] is False
+    )
+    assert "rag_roles" in registered["code_search"].parameters["properties"]
+    assert (
+        registered["code_text_search"].parameters["properties"]["include_secondary"]["default"]
+        is False
+    )
+    assert "rag_roles" in registered["code_text_search"].parameters["properties"]
     assert registered["code_text_search"].parameters["properties"]["limit"]["default"] == 5
     assert registered["code_discovery_context"].parameters["properties"]["limit"]["default"] == 3
     assert registered["code_lookup_type"].parameters["properties"]["limit"]["default"] == 10
