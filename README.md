@@ -27,6 +27,7 @@ Code graph tools:
 - `code_method_context`: bundled exact method lookup plus caller and callee context; use instead of separate lookup/callers/callees calls while tracing one target.
 - `code_impact`: refactor blast-radius lookup for matching method signatures; returns target methods plus depth-1/depth-2 callers, test flags, and file/package boundary flags.
 - `code_operation_hot_paths`: operation-sink hot paths for performance work, grouping methods that call APIs like run/query/write/read/save/delete; accepts owner/path filters for subsystem-focused audits.
+- `code_resource_risk_scan`: compact heuristic scan for risky query/config/resource patterns such as unbounded graph traversals, repeated subqueries, and per-row writes.
 - `code_test_context`: failing-test/CI triage from a test name or class fragment to tests, test files, and production callees.
 - `code_hierarchy`: class ancestry, children, interfaces, and interface implementors.
 
@@ -185,7 +186,9 @@ pass `include_tests=true` only for test coverage or test-specific questions. Use
 `code_impact` first for method signature changes and blast-radius review; it includes tests by
 default and flags file/package boundaries. Use `code_operation_hot_paths` alongside
 `code_hot_paths` for performance/write-path audits; pass `owner_fragment` or `path_contains` when
-the question names a subsystem such as writer, storage, parser, or adapter. Use `code_test_context`
+the question names a subsystem such as writer, storage, parser, or adapter. Add
+`code_resource_risk_scan` when performance, query complexity, or resource files are in scope; its
+rows are heuristic leads and should be source-verified before claiming a bug. Use `code_test_context`
 first for failing test or CI triage. Use `code_lookup_field` for constants and member variables, and `code_lookup_file`
 for indexed source, resource, template, and Cypher path discovery before falling back to text
 search. Use `memory_orientation(compact=true)` for status checks and memory write tools for task

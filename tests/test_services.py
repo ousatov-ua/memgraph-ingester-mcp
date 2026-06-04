@@ -357,6 +357,33 @@ class UniversalFlowClient:
                     "text": "stale chunks are refreshed",
                 }
             ]
+        if "chunk.sourceLabel = 'File'" in query and "chunk.text AS text" in query:
+            return [
+                {
+                    "path": "src/main/resources/demo/resolve-pending-calls.cypher",
+                    "language": "cypher",
+                    "text": (
+                        "Language: cypher\n"
+                        "Path: src/main/resources/demo/resolve-pending-calls.cypher\n"
+                        "Source excerpt:\n"
+                        "OPTIONAL MATCH (c:Class)-[:EXTENDS*1..]->(p:Class)\n"
+                        "CALL {\n  MATCH (file:File {path: $path}) RETURN file\n}\n"
+                        "CALL {\n  MATCH (file:File {path: $path}) RETURN file\n}\n"
+                        "CALL {\n  MATCH (file:File {path: $path}) RETURN file\n}\n"
+                    ),
+                },
+                {
+                    "path": "src/main/resources/demo/upsert-calls-by-name-batch.cypher",
+                    "language": "cypher",
+                    "text": (
+                        "Language: cypher\n"
+                        "Path: src/main/resources/demo/upsert-calls-by-name-batch.cypher\n"
+                        "Source excerpt:\n"
+                        "UNWIND $rows AS row\n"
+                        "OPTIONAL MATCH (c:Class)-[:EXTENDS*1..]->(p:Class)\n"
+                    ),
+                },
+            ]
         if "sinkCallEdges" in query:
             return [
                 {
@@ -685,6 +712,8 @@ def test_registered_code_tool_defaults_are_discovery_sized():
     assert registered["code_operation_hot_paths"].parameters["properties"]["limit"]["default"] == 5
     assert "owner_fragment" in registered["code_operation_hot_paths"].parameters["properties"]
     assert "path_contains" in registered["code_operation_hot_paths"].parameters["properties"]
+    assert registered["code_resource_risk_scan"].parameters["properties"]["limit"]["default"] == 5
+    assert "extensions" in registered["code_resource_risk_scan"].parameters["properties"]
     assert registered["code_test_context"].parameters["properties"]["limit"]["default"] == 5
     assert registered["code_quality_stats"].parameters["properties"]["limit"]["default"] == 5
     quality_defaults = registered["code_quality_stats"].parameters["properties"]
@@ -1292,6 +1321,36 @@ def test_code_operation_hot_paths_returns_risk_hints():
     ]
     assert client.calls[-1]["parameters"]["owner_fragment"] == "writer"
     assert client.calls[-1]["parameters"]["path_contains"] == "demo"
+
+
+def test_code_resource_risk_scan_returns_compact_resource_risks():
+    client = UniversalFlowClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_resource_risk_scan(
+        path_contains="resources",
+        extensions=["cypher"],
+        limit=5,
+        output_format="table_json",
+    )
+
+    assert result["resourceRisks"]["cols"] == [
+        "path",
+        "language",
+        "risk",
+        "score",
+        "pattern",
+        "line",
+        "evidence",
+        "why",
+        "occurrences",
+        "heuristic",
+    ]
+    patterns = [row[4] for row in result["resourceRisks"]["rows"]]
+    assert "per-row-unbounded-traversal" in patterns
+    assert "unbounded-variable-length-traversal" in patterns
+    assert result["meta"]["filters"]["extensions"] == [".cypher"]
+    assert result["meta"]["scannedFiles"] == 2
 
 
 def test_code_test_context_returns_tests_and_production_callees():

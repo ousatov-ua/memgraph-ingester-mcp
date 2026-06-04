@@ -366,6 +366,26 @@ def create_server(
         )
 
     @mcp.tool()
+    def code_resource_risk_scan(
+        project: str | None = None,
+        path_contains: str | None = None,
+        extensions: list[str] | None = None,
+        limit: int = DISCOVERY_LIMIT,
+        include_tests: bool = False,
+        format: str = "table_json",
+    ) -> dict[str, Any]:
+        """Return compact heuristic risks in query/config/resource files."""
+
+        return tools.code_resource_risk_scan(
+            project=project,
+            path_contains=path_contains,
+            extensions=extensions,
+            limit=limit,
+            include_tests=include_tests,
+            output_format=format,
+        )
+
+    @mcp.tool()
     def code_quality_stats(
         project: str | None = None,
         include_tests: bool = False,
