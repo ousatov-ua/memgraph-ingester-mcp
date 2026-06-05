@@ -1194,6 +1194,7 @@ def test_code_hot_paths_returns_compact_sections():
     assert {row["section"] for row in result["hotPaths"]} == {
         "longestMethods",
         "fanIn",
+        "fanOut",
     }
 
 
@@ -1228,6 +1229,7 @@ def test_code_hot_paths_can_return_table_json():
     assert result["hotPaths"]["rows"] == [
         [True, "longestMethods"],
         [True, "fanIn"],
+        [True, "fanOut"],
     ]
     assert "format" not in result["meta"]
 
