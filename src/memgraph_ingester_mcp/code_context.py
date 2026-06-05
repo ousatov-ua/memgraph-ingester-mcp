@@ -369,6 +369,9 @@ class CodeContextMixin:
                 related_files = related_context["files"]
 
         rows_for_meta = semantic_rows + lexical_rows + flow_edges + related_files
+        extra: dict[str, Any] = {"detail": normalized_detail}
+        if lexical_terms:
+            extra["lexicalTerms"] = lexical_terms
         return self._finalize_response(
             services._with_result_meta(
                 {
@@ -382,17 +385,7 @@ class CodeContextMixin:
                 },
                 rows_for_meta,
                 limit=bounded_anchor_limit,
-                extra={
-                    "selectedPaths": selected_paths,
-                    "relatedPaths": related_paths,
-                    "lexicalTerms": lexical_terms,
-                    "limitFiles": bounded_file_limit,
-                    "symbolLimit": bounded_symbol_limit,
-                    "detail": normalized_detail,
-                    "edgeLimit": edge_limit,
-                    "relatedFileLimit": related_file_limit,
-                    "includeTests": include_tests,
-                },
+                extra=extra,
             ),
             output_format,
         )

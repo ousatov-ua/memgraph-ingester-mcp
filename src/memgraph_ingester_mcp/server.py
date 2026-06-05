@@ -162,7 +162,7 @@ def create_server(
         query: str,
         project: str | None = None,
         limit_files: int = 3,
-        anchor_limit: int = 5,
+        anchor_limit: int = 3,
         symbol_limit: int = 3,
         include_tests: bool = False,
         detail: str = "compact",

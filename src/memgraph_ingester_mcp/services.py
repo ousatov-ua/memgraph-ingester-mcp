@@ -456,13 +456,11 @@ def _with_result_meta(
     total = returned_count if total_count is None else total_count
     next_skip = skip + returned_count
     meta: dict[str, Any] = {
-        "totalCount": total,
-        "returnedCount": returned_count,
-        "skip": skip,
-        "limit": limit,
         "hasMore": next_skip < total,
         "nextSkip": next_skip if next_skip < total else None,
     }
+    if total_count is not None and total > returned_count:
+        meta["totalCount"] = total
     if extra:
         meta.update(extra)
     response["meta"] = meta
@@ -841,6 +839,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 row.pop("sourceId", None)
                 row.pop("ragRole", None)
             row["owner"] = _compact_owner(row.get("owner"), row.get("name"))
+        saturated = len(raw_rows) >= fetch_limit
         return self._finalize_response(
             _with_result_meta(
                 {
@@ -850,23 +849,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 },
                 rows,
                 limit=bounded_limit,
-                extra={
-                    "includeKeys": include_keys,
-                    "fetchLimit": fetch_limit,
-                    "candidateCount": len(raw_rows),
-                    "filteredCandidateCount": len(filtered_rows),
-                    "candidateLimitReached": len(raw_rows) >= fetch_limit,
-                    "discoveryComplete": discovery_complete and len(filtered_rows) <= len(rows),
-                    "filters": {
-                        "kinds": sorted(kind_filter),
-                        "pathPrefixes": path_prefix_filter,
-                        "pathContains": path_contains_filter,
-                        "ownerFragment": owner_filter,
-                        "minScore": min_score,
-                        "includeSecondary": include_secondary,
-                        "ragRoles": role_filter,
-                    },
-                },
+                extra={"candidateLimitReached": True} if saturated else None,
             ),
             output_format,
         )
@@ -963,20 +946,10 @@ class MemgraphIngesterTools(CodeContextMixin):
                 {
                     "project": project_name,
                     "query": query,
-                    "allTerms": required_terms,
-                    "anyTerms": optional_terms,
                     "hits": rows,
                 },
                 rows,
                 limit=bounded_limit,
-                extra={
-                    "filters": {
-                        "kinds": kind_filter,
-                        "includeSecondary": include_secondary,
-                        "ragRoles": role_filter,
-                        "pathContains": path_contains_filter,
-                    },
-                },
             ),
             output_format,
         )

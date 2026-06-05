@@ -690,11 +690,7 @@ def test_code_search_omits_text_and_dedupes_by_default():
     assert "text" not in result["hits"][0]
     assert "chunk.text AS text" not in client.calls[0]["query"]
     assert client.calls[0]["parameters"]["rag_roles"] == ["primary", "file"]
-    assert result["meta"]["fetchLimit"] == 30
-    assert result["meta"]["candidateCount"] == 2
-    assert result["meta"]["filteredCandidateCount"] == 2
-    assert result["meta"]["candidateLimitReached"] is False
-    assert result["meta"]["discoveryComplete"] is False
+    assert result["meta"]["hasMore"] is False
 
 
 def test_code_search_demotes_synthetic_methods_before_stored_rag_role():
@@ -784,9 +780,6 @@ def test_code_search_can_include_keys_and_filters():
     )
 
     assert "sourceId" in result["hits"]["cols"]
-    assert result["meta"]["includeKeys"] is True
-    assert result["meta"]["filters"]["kinds"] == ["Method"]
-    assert result["meta"]["filters"]["ragRoles"] == ["primary", "file"]
 
 
 def test_code_search_can_include_secondary_chunks():
@@ -795,8 +788,6 @@ def test_code_search_can_include_secondary_chunks():
 
     result = tools.code_search("hot path", include_secondary=True)
 
-    assert result["meta"]["filters"]["includeSecondary"] is True
-    assert result["meta"]["filters"]["ragRoles"] == []
     assert client.calls[0]["parameters"]["rag_roles"] == []
 
 
@@ -820,7 +811,6 @@ def test_code_text_search_returns_compact_hits():
         "endLine",
         "termMatches",
     ]
-    assert result["meta"]["filters"]["ragRoles"] == ["primary", "file"]
     assert client.calls[0]["parameters"]["rag_roles"] == ["primary", "file"]
     assert client.calls[0]["parameters"]["search_terms"] == ["stale", "chunks"]
     assert result["hits"]["rows"][0][3] == "refresh"
@@ -883,7 +873,6 @@ def test_code_file_context_returns_compact_file_outlines():
     assert writer_row[5]["rows"] == [["Class", "Writer", "demo.Writer", "class", 1, 80]]
     assert writer_row[6]["rows"] == [["Writer", "refresh", "demo.Writer.refresh()", 10, 40]]
     assert writer_row[7]["rows"] == [["Writer", "cypher", "demo.Writer.cypher", 7, 7]]
-    assert result["meta"]["symbolLimit"] == 1
     assert client.calls[0]["parameters"]["fragments"] == ["Writer.java", "Orchestrator.java"]
 
 
@@ -926,10 +915,6 @@ def test_code_flow_context_bundles_anchors_files_and_edges():
     ]
     assert " AS caller," not in client.calls[-1]["query"]
     assert " AS callee," not in client.calls[-1]["query"]
-    assert result["meta"]["selectedPaths"] == [
-        "src/main/java/demo/Orchestrator.java",
-        "src/main/java/demo/Writer.java",
-    ]
     assert result["meta"]["lexicalTerms"] == ["refresh", "stale", "code", "chunks"]
     edge_call = client.calls[-1]
     assert "(callerFile.path IN $paths OR calleeFile.path IN $paths)" in edge_call["query"]
@@ -951,10 +936,7 @@ def test_code_flow_context_promotes_non_selected_edge_endpoint_files():
 
     assert result["files"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
     assert result["relatedFiles"]["rows"][0][0] == "src/main/java/demo/Writer.java"
-    assert result["meta"]["selectedPaths"] == ["src/main/java/demo/Orchestrator.java"]
-    assert result["meta"]["relatedPaths"] == ["src/main/java/demo/Writer.java"]
     assert result["meta"]["detail"] == "compact"
-    assert result["meta"]["relatedFileLimit"] == 1
 
 
 def test_code_flow_context_defaults_are_compact():
@@ -963,11 +945,7 @@ def test_code_flow_context_defaults_are_compact():
 
     result = tools.code_flow_context("refresh stale code chunks")
 
-    assert result["meta"]["limitFiles"] == 3
-    assert result["meta"]["limit"] == 5
-    assert result["meta"]["symbolLimit"] == 3
     assert result["meta"]["detail"] == "compact"
-    assert result["meta"]["edgeLimit"] == 9
     edge_calls = [
         call
         for call in client.calls
@@ -988,8 +966,6 @@ def test_code_flow_context_full_detail_keeps_expanded_edges_and_related_files():
     )
 
     assert result["meta"]["detail"] == "full"
-    assert result["meta"]["edgeLimit"] == 8
-    assert result["meta"]["relatedFileLimit"] == 2
 
 
 def test_table_json_rejects_unknown_format():
@@ -1020,7 +996,7 @@ def test_registered_code_tool_defaults_are_discovery_sized():
     assert registered["code_file_context"].parameters["properties"]["limit_files"]["default"] == 5
     assert registered["code_file_context"].parameters["properties"]["symbol_limit"]["default"] == 8
     assert registered["code_flow_context"].parameters["properties"]["limit_files"]["default"] == 3
-    assert registered["code_flow_context"].parameters["properties"]["anchor_limit"]["default"] == 5
+    assert registered["code_flow_context"].parameters["properties"]["anchor_limit"]["default"] == 3
     assert registered["code_flow_context"].parameters["properties"]["symbol_limit"]["default"] == 3
     assert (
         registered["code_flow_context"].parameters["properties"]["detail"]["default"] == "compact"
@@ -1198,9 +1174,9 @@ def test_code_method_context_bundles_methods_callers_and_callees():
         "startLine",
         "endLine",
     ]
-    assert result["meta"]["methods"]["limit"] == 5
-    assert result["meta"]["callers"]["limit"] == 5
-    assert result["meta"]["callees"]["limit"] == 5
+    assert "hasMore" in result["meta"]["methods"]
+    assert "hasMore" in result["meta"]["callers"]
+    assert "hasMore" in result["meta"]["callees"]
     assert result["meta"]["format"] == "table_json"
 
 
@@ -1274,7 +1250,7 @@ def test_code_quality_stats_returns_aggregate_sections():
     assert "methodLengths" in result
     assert "fanIn" in result
     assert "fanOut" in result
-    assert result["meta"]["limit"] == 3
+    assert "inventory" in result
 
 
 def test_code_quality_stats_can_return_table_json_sections():
@@ -1545,7 +1521,6 @@ def test_code_lookup_field_can_return_table_json():
             ]
         ],
     }
-    assert result["meta"]["totalCount"] == 1
     assert result["meta"]["format"] == "table_json"
 
 
@@ -1559,7 +1534,6 @@ def test_code_lookup_file_can_return_table_json():
         "cols": ["path", "language", "definitionCount", "chunkCount"],
         "rows": [["src/main/java/demo/GraphWriter.java", "java", 4, 9]],
     }
-    assert result["meta"]["totalCount"] == 1
     assert result["meta"]["format"] == "table_json"
 
 
