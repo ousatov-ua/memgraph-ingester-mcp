@@ -1198,7 +1198,7 @@ def test_code_hot_paths_returns_compact_sections():
 
     result = tools.code_hot_paths(limit=2, include_evidence=False)
 
-    assert result["meta"]["includeEvidence"] is False
+    assert "includeEvidence" not in result["meta"]
     assert {row["section"] for row in result["hotPaths"]} == {
         "longestMethods",
         "fanIn",
@@ -1215,7 +1215,7 @@ def test_code_hot_paths_can_filter_sections():
     )
 
     assert result["hotPaths"] == [{"ok": True, "section": "fanIn"}]
-    assert result["meta"]["sections"] == ["fanIn"]
+    assert "sections" not in result["meta"]
     assert len(tools.client.calls) == 1
     assert "count(call) AS callers" in tools.client.calls[0]["query"]
 
@@ -1410,7 +1410,7 @@ def test_delete_memory_reports_missing_without_writes():
     result = tools.delete_memory("MISSING")
 
     assert result["deleted"] is False
-    assert result["memory"] is None
+    assert "memory" not in result
     assert all(call["write"] is False for call in tools.client.calls)
 
 
@@ -1568,7 +1568,6 @@ def test_code_impact_returns_targets_and_boundary_flags():
         "targetOwner",
         "targetName",
         "isTest",
-        "crossesFileBoundary",
         "crossesPackageBoundary",
     ]
     assert result["impacts"]["rows"][0] == [
@@ -1584,10 +1583,9 @@ def test_code_impact_returns_targets_and_boundary_flags():
         "refreshCodeChunkEmbeddings",
         False,
         True,
-        True,
     ]
-    assert result["impacts"]["rows"][1][10:] == [True, True, True]
-    assert result["meta"]["targetCount"] == 1
+    assert result["impacts"]["rows"][1][10:] == [True, True]
+    assert "targetCount" not in result["meta"]
     assert result["meta"]["format"] == "table_json"
 
 
@@ -1610,7 +1608,7 @@ def test_code_impact_can_return_file_view():
         "crossPackageCount",
         "risk",
     ]
-    assert result["meta"]["view"] == "files"
+    assert "view" not in result["meta"]
 
 
 def test_code_operation_hot_paths_returns_risk_hints():
@@ -1629,11 +1627,9 @@ def test_code_operation_hot_paths_returns_risk_hints():
         "path",
         "startLine",
         "endLine",
-        "lines",
         "sinkCallEdges",
         "distinctSinks",
         "sinks",
-        "score",
         "riskHints",
     ]
     assert result["operationHotPaths"]["rows"][0][-1] == [
@@ -1671,8 +1667,8 @@ def test_code_resource_risk_scan_returns_compact_resource_risks():
     patterns = [row[4] for row in result["resourceRisks"]["rows"]]
     assert "per-row-unbounded-traversal" in patterns
     assert "unbounded-variable-length-traversal" in patterns
-    assert result["meta"]["filters"]["extensions"] == [".cypher"]
-    assert result["meta"]["scannedFiles"] == 2
+    assert "filters" not in result["meta"]
+    assert "scannedFiles" not in result["meta"]
 
 
 def test_code_test_context_returns_tests_and_production_callees():
@@ -1688,12 +1684,10 @@ def test_code_test_context_returns_tests_and_production_callees():
         "path",
         "startLine",
         "endLine",
-        "exactish",
-        "termMatches",
     ]
     assert result["productionCallees"]["rows"][0][0] == "Writer"
     assert result["meta"]["exactMatches"] == 1
-    assert result["meta"]["methodFragment"] == "refreshes"
+    assert "methodFragment" not in result["meta"]
 
 
 def test_code_test_context_anchors_class_method_fragments():
@@ -1708,7 +1702,7 @@ def test_code_test_context_anchors_class_method_fragments():
     test_query_params = client.calls[-3]["parameters"]
     assert test_query_params["owner_fragment"] == "WriterTest"
     assert test_query_params["min_term_matches"] == 3
-    assert result["meta"]["terms"] == ["refreshes", "dirty", "embeddings", "watch"]
+    assert "terms" not in result["meta"]
 
 
 def test_memory_orientation_can_be_compact():

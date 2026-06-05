@@ -408,6 +408,15 @@ def _normalize_output_format(output_format: str | None) -> str:
     return normalized
 
 
+def _strip_nones(obj: Any) -> Any:
+    """Recursively remove None-valued keys from dicts. Absent keys signal null/empty to callers."""
+    if isinstance(obj, Mapping):
+        return {k: _strip_nones(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_strip_nones(item) for item in obj]
+    return obj
+
+
 def _to_table_json(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {str(key): _to_table_json(item) for key, item in value.items()}
@@ -418,9 +427,13 @@ def _to_table_json(value: Any) -> Any:
                 column = str(key)
                 if column not in columns:
                     columns.append(column)
+        # Drop columns that are None in every row — callers should treat absent as null.
+        live_columns = [col for col in columns if any(row.get(col) is not None for row in value)]
         return {
-            "cols": columns,
-            "rows": [[_to_table_json(row.get(column)) for column in columns] for row in value],
+            "cols": live_columns,
+            "rows": [
+                [_to_table_json(row.get(col)) for col in live_columns] for row in value
+            ],
         }
     return value
 
@@ -431,7 +444,7 @@ def _format_response(
 ) -> dict[str, Any]:
     normalized = _normalize_output_format(output_format)
     if normalized == "json":
-        return response
+        return _strip_nones(response)
 
     formatted = _to_table_json(response)
     if not isinstance(formatted, dict):  # pragma: no cover - response is always a dict today.
@@ -455,10 +468,10 @@ def _with_result_meta(
     returned_count = len(rows)
     total = returned_count if total_count is None else total_count
     next_skip = skip + returned_count
-    meta: dict[str, Any] = {
-        "hasMore": next_skip < total,
-        "nextSkip": next_skip if next_skip < total else None,
-    }
+    has_more = next_skip < total
+    meta: dict[str, Any] = {"hasMore": has_more}
+    if has_more:
+        meta["nextSkip"] = next_skip
     if total_count is not None and total > returned_count:
         meta["totalCount"] = total
     if extra:
@@ -842,11 +855,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         saturated = len(raw_rows) >= fetch_limit
         return self._finalize_response(
             _with_result_meta(
-                {
-                    "project": project_name,
-                    "query": query,
-                    "hits": rows,
-                },
+                {"project": project_name, "hits": rows},
                 rows,
                 limit=bounded_limit,
                 extra={"candidateLimitReached": True} if saturated else None,
@@ -943,11 +952,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             row["owner"] = _compact_owner(row.get("owner"), row.get("name"))
         return self._finalize_response(
             _with_result_meta(
-                {
-                    "project": project_name,
-                    "query": query,
-                    "hits": rows,
-                },
+                {"project": project_name, "hits": rows},
                 rows,
                 limit=bounded_limit,
             ),
@@ -1595,9 +1600,6 @@ class MemgraphIngesterTools(CodeContextMixin):
                 _with_result_meta(
                     {
                         "project": project_name,
-                        "fragment": signature_fragment,
-                        "depth": depth_value,
-                        "includeTests": include_tests,
                         "targetMethods": targets,
                         "files": file_rows,
                     },
@@ -1605,7 +1607,6 @@ class MemgraphIngesterTools(CodeContextMixin):
                     skip=0,
                     limit=limit_value,
                     total_count=len(file_rows),
-                    extra={"targetCount": len(target_rows), "view": view},
                 ),
                 output_format,
             )
@@ -1613,9 +1614,6 @@ class MemgraphIngesterTools(CodeContextMixin):
             _with_result_meta(
                 {
                     "project": project_name,
-                    "fragment": signature_fragment,
-                    "depth": depth_value,
-                    "includeTests": include_tests,
                     "targetMethods": targets,
                     "impacts": impacts,
                 },
@@ -1623,7 +1621,6 @@ class MemgraphIngesterTools(CodeContextMixin):
                 skip=skip_value,
                 limit=limit_value,
                 total_count=total_count,
-                extra={"targetCount": len(target_rows), "view": view},
             ),
             output_format,
         )
@@ -1690,12 +1687,10 @@ class MemgraphIngesterTools(CodeContextMixin):
         target_package = _package_name(row.get("targetOwnerFqn"))
         enriched = dict(row)
         enriched["isTest"] = _is_test_path(caller_path)
-        enriched["crossesFileBoundary"] = (
-            caller_path != target_path if caller_path and target_path else None
-        )
-        enriched["crossesPackageBoundary"] = (
+        crosses_pkg = (
             caller_package != target_package if caller_package and target_package else None
         )
+        enriched["crossesPackageBoundary"] = crosses_pkg
         if not compact:
             return enriched
         return {
@@ -1711,8 +1706,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             "targetName": enriched.get("targetName")
             or _method_name(enriched.get("targetSignature")),
             "isTest": enriched.get("isTest"),
-            "crossesFileBoundary": enriched.get("crossesFileBoundary"),
-            "crossesPackageBoundary": enriched.get("crossesPackageBoundary"),
+            "crossesPackageBoundary": crosses_pkg,
         }
 
     def code_callers(
@@ -1843,7 +1837,6 @@ class MemgraphIngesterTools(CodeContextMixin):
         return self._finalize_response(
             {
                 "project": project_name,
-                "fragment": signature_fragment,
                 "methods": methods["methods"],
                 "callers": callers["callers"],
                 "callees": callees["callees"],
@@ -2061,21 +2054,9 @@ class MemgraphIngesterTools(CodeContextMixin):
                 rows.append(row)
         return self._finalize_response(
             _with_result_meta(
-                {
-                    "project": project_name,
-                    "includeTests": include_tests,
-                    "hotPaths": rows,
-                },
+                {"project": project_name, "hotPaths": rows},
                 rows,
                 limit=bounded_limit,
-                extra={
-                    "includeEvidence": include_evidence,
-                    "sections": [
-                        section
-                        for section in ("largestTypes", "longestMethods", "fanIn", "fanOut")
-                        if section in requested_sections
-                    ],
-                },
             ),
             output_format,
         )
@@ -2144,30 +2125,29 @@ class MemgraphIngesterTools(CodeContextMixin):
         )
         for row in rows:
             row.pop("signature", None)
+            row.pop("score", None)
+            row.pop("lines", None)
             row["riskHints"] = [
                 hint
                 for hint, active in (
                     ("many-sink-calls", (row.get("sinkCallEdges") or 0) >= 5),
-                    ("large-method", (row.get("lines") or 0) >= 50),
+                    ("large-method", (row.get("endLine") or 0) - (row.get("startLine") or 0) >= 49),
                     ("multi-sink", (row.get("distinctSinks") or 0) >= 3),
                 )
                 if active
             ]
+        extra: dict[str, Any] | None = None
+        if owner_filter or path_filter:
+            extra = {k: v for k, v in (
+                ("ownerFragment", owner_filter),
+                ("pathContains", path_filter),
+            ) if v}
         return self._finalize_response(
             _with_result_meta(
-                {
-                    "project": project_name,
-                    "sinkFragments": fragments,
-                    "operationHotPaths": rows,
-                },
+                {"project": project_name, "operationHotPaths": rows},
                 rows,
                 limit=bounded_limit,
-                extra={
-                    "filters": {
-                        "ownerFragment": owner_filter,
-                        "pathContains": path_filter,
-                    },
-                },
+                extra=extra,
             ),
             output_format,
         )
@@ -2232,21 +2212,9 @@ class MemgraphIngesterTools(CodeContextMixin):
         rows = rows[:bounded_limit]
         return self._finalize_response(
             _with_result_meta(
-                {
-                    "project": project_name,
-                    "resourceRisks": rows,
-                },
+                {"project": project_name, "resourceRisks": rows},
                 rows,
                 limit=bounded_limit,
-                extra={
-                    "filters": {
-                        "pathContains": path_filter,
-                        "extensions": extension_filter,
-                        "includeTests": include_tests,
-                    },
-                    "candidateLimit": candidate_limit,
-                    "scannedFiles": scanned_files,
-                },
             ),
             output_format,
         )
@@ -2519,22 +2487,17 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "limit": bounded_limit,
             },
         )
+        exact_matches = sum(1 for row in rows if row.get("exactish"))
+        for row in rows:
+            row.pop("exactish", None)
+            row.pop("termMatches", None)
         return self._finalize_response(
             {
                 "project": project_name,
-                "fragment": test_fragment,
                 "tests": rows,
                 "productionCallees": production_rows,
                 "testFiles": file_rows,
-                "meta": {
-                    "limit": bounded_limit,
-                    "productionLimit": bounded_production_limit,
-                    "exactMatches": sum(1 for row in rows if row.get("exactish")),
-                    "ownerFragment": owner_fragment,
-                    "methodFragment": method_fragment,
-                    "terms": terms,
-                    "minTermMatches": min_term_matches,
-                },
+                "meta": {"exactMatches": exact_matches},
             },
             output_format,
         )
