@@ -319,7 +319,10 @@ def _resource_risk_rows(path: str, language: str | None, text: str) -> list[dict
             pattern="write-inside-foreach",
             line=None,
             evidence="FOREACH with write clauses",
-            why="Writes inside FOREACH can be database-version-sensitive and deserve verification.",
+            why=(
+                "FOREACH with write clauses. Verify this is not a per-row write loop; "
+                "single-item conditional FOREACH (CASE THEN [1] ELSE []) is idiomatic and safe."
+            ),
         )
 
     return rows
@@ -1951,7 +1954,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         requested_sections = _normalize_sections(
             sections,
             allowed=HOT_PATH_SECTIONS,
-            default=frozenset({"fanIn", "longestMethods"}),
+            default=frozenset({"fanIn", "longestMethods", "fanOut"}),
         )
         params = {
             "project": project_name,

@@ -287,7 +287,9 @@ def create_server(
         view: str = "callers",
         format: str = "table_json",
     ) -> dict[str, Any]:
-        """Map refactor impact for matching methods through direct and one-level callers."""
+        """Map refactor impact for matching methods through direct and one-level callers.
+        Use view='files' to get a pre-ranked deduplicated file list (role, depth,
+        testCallerCount, crossPackageCount, risk) — the direct answer for blast-radius tasks."""
 
         return tools.code_impact(
             signature_fragment=signature_fragment,
