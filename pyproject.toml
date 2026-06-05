@@ -24,9 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-compression = [
-    "llmlingua>=0.2.2",
-]
+compression = []
 
 [project.urls]
 Homepage = "https://github.com/ousatov-ua/memgraph-ingester-mcp"

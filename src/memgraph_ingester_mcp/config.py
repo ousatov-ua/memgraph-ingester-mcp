@@ -48,8 +48,8 @@ class MemgraphConfig:
     embedding_model_name: str = "default"
     embedding_dimensions: int = 384
     compression_enabled: bool = False
-    compression_provider: str = "llmlingua"
-    compression_model_name: str = "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank"
+    compression_provider: str = "none"
+    compression_model_name: str = ""
     compression_device: str = "cpu"
     compression_rate: float = 0.5
     compression_min_chars: int = 800

@@ -1,6 +1,5 @@
 import pytest
 
-from memgraph_ingester_mcp.compression import ResponseCompressor
 from memgraph_ingester_mcp.config import MemgraphConfig
 from memgraph_ingester_mcp.db import MemgraphError
 from memgraph_ingester_mcp.server import create_server
@@ -495,11 +494,7 @@ class CodeContextClient:
             fragments = params.get("fragments") or []
             if not fragments:
                 return rows
-            return [
-                row
-                for row in rows
-                if any(fragment in row["path"] for fragment in fragments)
-            ]
+            return [row for row in rows if any(fragment in row["path"] for fragment in fragments)]
         if "node:Class OR node:Interface OR node:Annotation" in query:
             return [
                 {
@@ -726,20 +721,7 @@ def test_code_search_can_include_bounded_text():
     assert "chunk.text AS text" in client.calls[0]["query"]
 
 
-def test_code_search_can_compress_long_text_fields_after_compaction():
-    class FakePromptCompressor:
-        def compress_prompt(self, prompt, *, rate, force_tokens):
-            assert "src/main/java/demo/Foo.java" not in prompt
-            assert rate == 0.5
-            assert "\n" in force_tokens
-            return {
-                "compressed_prompt": "compressed source excerpt",
-                "origin_tokens": 100,
-                "compressed_tokens": 20,
-                "ratio": "5.0x",
-                "rate": "20.0%",
-            }
-
+def test_code_search_compression_hook_is_noop():
     client = SearchClient()
     config = MemgraphConfig(
         default_project="demo",
@@ -747,10 +729,6 @@ def test_code_search_can_compress_long_text_fields_after_compaction():
         compression_min_chars=100,
     )
     tools = MemgraphIngesterTools(client, config)
-    tools._response_compressor = ResponseCompressor(
-        config,
-        factory=FakePromptCompressor,
-    )
 
     result = tools.code_search(
         "hot path",
@@ -760,11 +738,8 @@ def test_code_search_can_compress_long_text_fields_after_compaction():
     )
 
     assert result["hits"][0]["path"] == "src/main/java/demo/Foo.java"
-    assert result["hits"][0]["text"] == "compressed source excerpt"
-    assert result["meta"]["compression"]["status"] == "applied"
-    assert result["meta"]["compression"]["compressedPaths"] == ["hits[0].text"]
-    assert result["meta"]["compression"]["stats"]["originTokens"] == 100
-    assert result["meta"]["compression"]["stats"]["compressedTokens"] == 20
+    assert result["hits"][0]["text"] == "x" * 500
+    assert "compression" not in result["meta"]
 
 
 def test_code_search_can_return_table_json():
