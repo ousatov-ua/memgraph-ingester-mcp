@@ -161,10 +161,11 @@ def create_server(
     def code_flow_context(
         query: str,
         project: str | None = None,
-        limit_files: int = 5,
-        anchor_limit: int = 8,
-        symbol_limit: int = 8,
+        limit_files: int = 3,
+        anchor_limit: int = 5,
+        symbol_limit: int = 3,
         include_tests: bool = False,
+        detail: str = "compact",
         format: str = "table_json",
     ) -> dict[str, Any]:
         """Return semantic and lexical anchors, file outlines, and nearby call edges."""
@@ -176,6 +177,7 @@ def create_server(
             anchor_limit=anchor_limit,
             symbol_limit=symbol_limit,
             include_tests=include_tests,
+            detail=detail,
             output_format=format,
         )
 

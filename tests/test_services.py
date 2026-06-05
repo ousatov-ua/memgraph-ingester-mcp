@@ -478,7 +478,7 @@ class CodeContextClient:
                 }
             ]
         if "definitionCount" in query and "MATCH (file:File" in query:
-            return [
+            rows = [
                 {
                     "path": "src/main/java/demo/Writer.java",
                     "language": "java",
@@ -491,6 +491,14 @@ class CodeContextClient:
                     "definitionCount": 2,
                     "chunkCount": 4,
                 },
+            ]
+            fragments = params.get("fragments") or []
+            if not fragments:
+                return rows
+            return [
+                row
+                for row in rows
+                if any(fragment in row["path"] for fragment in fragments)
             ]
         if "node:Class OR node:Interface OR node:Annotation" in query:
             return [
@@ -687,6 +695,24 @@ def test_code_search_omits_text_and_dedupes_by_default():
     assert "text" not in result["hits"][0]
     assert "chunk.text AS text" not in client.calls[0]["query"]
     assert client.calls[0]["parameters"]["rag_roles"] == ["primary", "file"]
+    assert result["meta"]["fetchLimit"] == 30
+    assert result["meta"]["candidateCount"] == 2
+    assert result["meta"]["filteredCandidateCount"] == 2
+    assert result["meta"]["candidateLimitReached"] is False
+    assert result["meta"]["discoveryComplete"] is False
+
+
+def test_code_search_demotes_synthetic_methods_before_stored_rag_role():
+    client = SearchClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    tools.code_search("hot path")
+
+    query = client.calls[0]["query"]
+    assert "coalesce(source.startLine, 0) <= 0" in query
+    synthetic_index = query.index("THEN 'synthetic'")
+    stored_role_index = query.index("ELSE coalesce(chunk.ragRole, 'primary')")
+    assert synthetic_index < stored_role_index
 
 
 def test_code_search_can_include_bounded_text():
@@ -826,6 +852,19 @@ def test_code_text_search_returns_compact_hits():
     assert result["meta"]["format"] == "table_json"
 
 
+def test_code_text_search_demotes_synthetic_methods_before_stored_rag_role():
+    client = UniversalFlowClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    tools.code_text_search(query="stale chunks")
+
+    query = client.calls[0]["query"]
+    assert "coalesce(source.startLine, 0) <= 0" in query
+    synthetic_index = query.index("THEN 'synthetic'")
+    stored_role_index = query.index("ELSE coalesce(chunk.ragRole, 'primary')")
+    assert synthetic_index < stored_role_index
+
+
 def test_code_text_search_tokenizes_plain_query():
     client = UniversalFlowClient()
     tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
@@ -918,7 +957,64 @@ def test_code_flow_context_bundles_anchors_files_and_edges():
     ]
     assert result["meta"]["lexicalTerms"] == ["refresh", "stale", "code", "chunks"]
     edge_call = client.calls[-1]
+    assert "(callerFile.path IN $paths OR calleeFile.path IN $paths)" in edge_call["query"]
+    assert edge_call["parameters"]["include_tests"] is False
     assert edge_call["parameters"]["limit"] == 2
+
+
+def test_code_flow_context_promotes_non_selected_edge_endpoint_files():
+    client = CodeContextClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_flow_context(
+        "refresh stale code chunks",
+        limit_files=1,
+        anchor_limit=2,
+        symbol_limit=1,
+        output_format="table_json",
+    )
+
+    assert result["files"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
+    assert result["relatedFiles"]["rows"][0][0] == "src/main/java/demo/Writer.java"
+    assert result["meta"]["selectedPaths"] == ["src/main/java/demo/Orchestrator.java"]
+    assert result["meta"]["relatedPaths"] == ["src/main/java/demo/Writer.java"]
+    assert result["meta"]["detail"] == "compact"
+    assert result["meta"]["relatedFileLimit"] == 1
+
+
+def test_code_flow_context_defaults_are_compact():
+    client = CodeContextClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_flow_context("refresh stale code chunks")
+
+    assert result["meta"]["limitFiles"] == 3
+    assert result["meta"]["limit"] == 5
+    assert result["meta"]["symbolLimit"] == 3
+    assert result["meta"]["detail"] == "compact"
+    assert result["meta"]["edgeLimit"] == 9
+    edge_calls = [
+        call
+        for call in client.calls
+        if "-[:CALLS]->" in call["query"] and "callerFile.path IN $paths" in call["query"]
+    ]
+    assert edge_calls[0]["parameters"]["limit"] == 9
+
+
+def test_code_flow_context_full_detail_keeps_expanded_edges_and_related_files():
+    client = CodeContextClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_flow_context(
+        "refresh stale code chunks",
+        limit_files=2,
+        symbol_limit=4,
+        detail="full",
+    )
+
+    assert result["meta"]["detail"] == "full"
+    assert result["meta"]["edgeLimit"] == 8
+    assert result["meta"]["relatedFileLimit"] == 2
 
 
 def test_table_json_rejects_unknown_format():
@@ -948,8 +1044,12 @@ def test_registered_code_tool_defaults_are_discovery_sized():
     assert registered["code_discovery_context"].parameters["properties"]["limit"]["default"] == 3
     assert registered["code_file_context"].parameters["properties"]["limit_files"]["default"] == 5
     assert registered["code_file_context"].parameters["properties"]["symbol_limit"]["default"] == 8
-    assert registered["code_flow_context"].parameters["properties"]["limit_files"]["default"] == 5
-    assert registered["code_flow_context"].parameters["properties"]["anchor_limit"]["default"] == 8
+    assert registered["code_flow_context"].parameters["properties"]["limit_files"]["default"] == 3
+    assert registered["code_flow_context"].parameters["properties"]["anchor_limit"]["default"] == 5
+    assert registered["code_flow_context"].parameters["properties"]["symbol_limit"]["default"] == 3
+    assert (
+        registered["code_flow_context"].parameters["properties"]["detail"]["default"] == "compact"
+    )
     assert registered["code_lookup_type"].parameters["properties"]["limit"]["default"] == 10
     assert (
         registered["code_lookup_type"].parameters["properties"]["include_tests"]["default"] is False

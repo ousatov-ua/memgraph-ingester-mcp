@@ -26,7 +26,8 @@ Code graph tools:
 - `code_search`: CodeChunk vector search for broad discovery; defaults to 5 non-test, deduped, primary/file-role hits and omits text/source keys unless requested; supports compact filters.
 - `code_text_search`: ranked lexical search over indexed chunk text/path/source ids for concrete-term discovery; defaults to primary/file-role hits and returns `termMatches`.
 - `code_discovery_context`: semantic discovery plus bounded exact/caller/callee/file context in one compact response.
-- `code_flow_context`: semantic plus lexical anchors, compact file outlines, and call edges touching selected files for workflow discovery.
+- `code_flow_context`: compact workflow discovery with semantic/lexical anchors, likely file
+  outlines, related paths, and bounded nearby call edges; pass `detail="full"` for wider expansion.
 - `code_file_context`: deterministic file outlines with language, definition/chunk counts, RAG role counts, and top symbols.
 - `code_lookup_type`: exact class/interface/annotation lookup; test code and member expansion are opt-in.
 - `code_lookup_methods`: exact method lookup with source ranges; defaults to 10 compact owner/name/path rows.
@@ -200,7 +201,8 @@ you need graph-wide baselines. Compact method/search/call-graph rows are range-f
 signatures; request non-compact output only when signatures or modifiers are needed. Use
 `code_method_context` when tracing one method so one MCP call replaces lookup plus callers plus
 callees. Use `code_flow_context` for workflow-level concept discovery when you need likely files and
-their call edges in one response. Use `code_file_context` when file paths are known and you need a
+a small first-hop call map in one response; pass `detail="full"` only when the compact map is too
+narrow. Use `code_file_context` when file paths are known and you need a
 compact indexed outline before opening source. Use `code_discovery_context` for small anchor-focused
 concept work before separate RAG/refine loops, and use `code_text_search` when concrete terms are
 likely present; lexical rows are ranked by matched-term count. RAG searches default to primary/file

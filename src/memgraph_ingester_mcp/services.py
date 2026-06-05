@@ -776,22 +776,20 @@ class MemgraphIngesterTools(CodeContextMixin):
               AND ($include_tests OR chunk.path IS NULL OR NOT chunk.path STARTS WITH 'src/test/')
             MATCH (source {project: $project})-[:HAS_RAG_CHUNK]->(chunk)
             WITH chunk, source, similarity,
-                 coalesce(chunk.ragRole,
-                   CASE
-                     WHEN chunk.sourceLabel = 'Field' THEN 'secondary'
-                     WHEN chunk.sourceLabel = 'File' THEN 'file'
-                     WHEN chunk.sourceLabel = 'Class'
-                       AND coalesce(chunk.kind, source.kind, '') = 'module' THEN 'synthetic'
-                     WHEN chunk.sourceLabel = 'Method'
-                       AND coalesce(chunk.startLine, source.startLine, 0) <= 0 THEN 'synthetic'
-                     ELSE 'primary'
-                   END
-                 ) AS effectiveRole
+                 CASE
+                   WHEN chunk.sourceLabel = 'Method'
+                     AND coalesce(source.startLine, 0) <= 0 THEN 'synthetic'
+                   WHEN chunk.sourceLabel = 'Class'
+                     AND coalesce(chunk.kind, source.kind, '') = 'module' THEN 'synthetic'
+                   WHEN chunk.sourceLabel = 'Field' THEN 'secondary'
+                   WHEN chunk.sourceLabel = 'File' THEN 'file'
+                   ELSE coalesce(chunk.ragRole, 'primary')
+                 END AS effectiveRole
             WHERE size($rag_roles) = 0 OR effectiveRole IN $rag_roles
             RETURN __RETURN_PROJECTION__
             ORDER BY similarity DESC
             """.replace("__RETURN_PROJECTION__", return_projection.strip())
-        rows = self.client.run(
+        raw_rows = self.client.run(
             search_query,
             {
                 "project": project_name,
@@ -806,7 +804,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         path_contains_filter = (path_contains or "").strip()
         owner_filter = (owner_fragment or "").strip()
         filtered_rows: list[dict[str, Any]] = []
-        for row in rows:
+        for row in raw_rows:
             if kind_filter and row.get("kind") not in kind_filter:
                 continue
             if not _starts_with_any(row.get("path"), path_prefix_filter):
@@ -819,6 +817,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 continue
             filtered_rows.append(row)
         rows = filtered_rows
+        discovery_complete = len(raw_rows) < fetch_limit
         if dedupe_by_source:
             deduped: list[dict[str, Any]] = []
             seen: set[tuple[str, str]] = set()
@@ -853,6 +852,11 @@ class MemgraphIngesterTools(CodeContextMixin):
                 limit=bounded_limit,
                 extra={
                     "includeKeys": include_keys,
+                    "fetchLimit": fetch_limit,
+                    "candidateCount": len(raw_rows),
+                    "filteredCandidateCount": len(filtered_rows),
+                    "candidateLimitReached": len(raw_rows) >= fetch_limit,
+                    "discoveryComplete": discovery_complete and len(filtered_rows) <= len(rows),
                     "filters": {
                         "kinds": sorted(kind_filter),
                         "pathPrefixes": path_prefix_filter,
@@ -906,17 +910,15 @@ class MemgraphIngesterTools(CodeContextMixin):
             WITH source, chunk,
                  toLower(coalesce(chunk.text, '') + ' ' + coalesce(chunk.path, '') + ' '
                          + coalesce(chunk.sourceId, '')) AS haystack,
-                 coalesce(chunk.ragRole,
-                   CASE
-                     WHEN chunk.sourceLabel = 'Field' THEN 'secondary'
-                     WHEN chunk.sourceLabel = 'File' THEN 'file'
-                     WHEN chunk.sourceLabel = 'Class'
-                       AND coalesce(chunk.kind, source.kind, '') = 'module' THEN 'synthetic'
-                     WHEN chunk.sourceLabel = 'Method'
-                       AND coalesce(chunk.startLine, source.startLine, 0) <= 0 THEN 'synthetic'
-                   ELSE 'primary'
-                   END
-                 ) AS effectiveRole
+                 CASE
+                   WHEN chunk.sourceLabel = 'Method'
+                     AND coalesce(source.startLine, 0) <= 0 THEN 'synthetic'
+                   WHEN chunk.sourceLabel = 'Class'
+                     AND coalesce(chunk.kind, source.kind, '') = 'module' THEN 'synthetic'
+                   WHEN chunk.sourceLabel = 'Field' THEN 'secondary'
+                   WHEN chunk.sourceLabel = 'File' THEN 'file'
+                   ELSE coalesce(chunk.ragRole, 'primary')
+                 END AS effectiveRole
             WITH source, chunk, haystack, effectiveRole,
                  [term IN $search_terms WHERE haystack CONTAINS term] AS matchedTerms
             WHERE ($include_tests OR chunk.path IS NULL OR NOT chunk.path STARTS WITH 'src/test/')

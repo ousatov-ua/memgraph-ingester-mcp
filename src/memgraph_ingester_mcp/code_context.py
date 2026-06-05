@@ -207,17 +207,30 @@ class CodeContextMixin:
         self,
         query: str,
         project: str | None = None,
-        limit_files: int = 5,
-        anchor_limit: int = 8,
-        symbol_limit: int = 8,
+        limit_files: int = 3,
+        anchor_limit: int = 5,
+        symbol_limit: int = 3,
         include_tests: bool = False,
+        detail: str = "compact",
         output_format: str = "json",
     ) -> dict[str, Any]:
         services = _services()
         project_name = self.resolve_project(project)
-        bounded_file_limit = services._bounded_limit(limit_files, default=5, maximum=12)
-        bounded_anchor_limit = services._bounded_limit(anchor_limit, default=8, maximum=25)
-        bounded_symbol_limit = services._bounded_symbol_limit(symbol_limit)
+        bounded_file_limit = services._bounded_limit(limit_files, default=3, maximum=12)
+        bounded_anchor_limit = services._bounded_limit(anchor_limit, default=5, maximum=25)
+        bounded_symbol_limit = services._bounded_limit(symbol_limit, default=3, maximum=50)
+        normalized_detail = (detail or "compact").strip().lower()
+        if normalized_detail not in {"compact", "full"}:
+            raise MemgraphError("detail must be 'compact' or 'full'.")
+        flow_symbol_limit = (
+            bounded_symbol_limit if normalized_detail == "full" else min(bounded_symbol_limit, 3)
+        )
+        related_file_limit = 2 if normalized_detail == "full" else 1
+        edge_limit = (
+            bounded_file_limit * bounded_symbol_limit
+            if normalized_detail == "full"
+            else min(bounded_file_limit * flow_symbol_limit, 12)
+        )
 
         semantic = self.code_search(
             query=query,
@@ -274,7 +287,7 @@ class CodeContextMixin:
                 selected_paths,
                 project=project_name,
                 limit_files=bounded_file_limit,
-                symbol_limit=bounded_symbol_limit,
+                symbol_limit=flow_symbol_limit,
                 include_tests=include_tests,
                 output_format="json",
             )
@@ -284,6 +297,8 @@ class CodeContextMixin:
         files = file_context["files"]
 
         flow_edges = []
+        related_files = []
+        related_paths: list[str] = []
         if selected_paths:
             flow_edges = self.client.run(
                 """
@@ -291,7 +306,10 @@ class CodeContextMixin:
                   -[:DEFINES]->(caller:Method {project: $project})
                   -[:CALLS]->(callee:Method {project: $project})
                   <-[:DEFINES]-(calleeFile:File {project: $project})
-                WHERE callerFile.path IN $paths OR calleeFile.path IN $paths
+                WHERE (callerFile.path IN $paths OR calleeFile.path IN $paths)
+                  AND ($include_tests
+                       OR (NOT callerFile.path STARTS WITH 'src/test/'
+                           AND NOT calleeFile.path STARTS WITH 'src/test/'))
                 RETURN callerFile.path AS callerPath,
                        caller.ownerDisplayName AS callerOwner,
                        caller.name AS callerName,
@@ -306,11 +324,51 @@ class CodeContextMixin:
                 {
                     "project": project_name,
                     "paths": selected_paths,
-                    "limit": bounded_file_limit * bounded_symbol_limit,
+                    "limit": edge_limit,
+                    "include_tests": include_tests,
                 },
             )
+            edge_path_counts: dict[str, int] = {}
+            related_candidates: list[str] = []
 
-        rows_for_meta = semantic_rows + lexical_rows + flow_edges
+            def add_related_candidate(path: Any) -> None:
+                if (
+                    isinstance(path, str)
+                    and path
+                    and path not in selected_paths
+                    and path not in related_candidates
+                ):
+                    related_candidates.append(path)
+
+            for selected_path in selected_paths:
+                for edge in flow_edges:
+                    if edge.get("callerPath") == selected_path:
+                        add_related_candidate(edge.get("calleePath"))
+                    if edge.get("calleePath") == selected_path:
+                        add_related_candidate(edge.get("callerPath"))
+            for edge in flow_edges:
+                for key in ("callerPath", "calleePath"):
+                    path = edge.get(key)
+                    if isinstance(path, str) and path and path not in selected_paths:
+                        edge_path_counts[path] = edge_path_counts.get(path, 0) + 1
+            for path, _count in sorted(
+                edge_path_counts.items(), key=lambda item: (-item[1], item[0])
+            ):
+                add_related_candidate(path)
+            related_paths = related_candidates[:2]
+            if related_paths:
+                outlined_related_paths = related_paths[:related_file_limit]
+                related_context = self.code_file_context(
+                    outlined_related_paths,
+                    project=project_name,
+                    limit_files=len(outlined_related_paths),
+                    symbol_limit=flow_symbol_limit,
+                    include_tests=include_tests,
+                    output_format="json",
+                )
+                related_files = related_context["files"]
+
+        rows_for_meta = semantic_rows + lexical_rows + flow_edges + related_files
         return self._finalize_response(
             services._with_result_meta(
                 {
@@ -319,15 +377,20 @@ class CodeContextMixin:
                     "anchors": semantic_rows,
                     "lexicalAnchors": lexical_rows,
                     "files": files,
+                    "relatedFiles": related_files,
                     "flowEdges": flow_edges,
                 },
                 rows_for_meta,
                 limit=bounded_anchor_limit,
                 extra={
                     "selectedPaths": selected_paths,
+                    "relatedPaths": related_paths,
                     "lexicalTerms": lexical_terms,
                     "limitFiles": bounded_file_limit,
                     "symbolLimit": bounded_symbol_limit,
+                    "detail": normalized_detail,
+                    "edgeLimit": edge_limit,
+                    "relatedFileLimit": related_file_limit,
                     "includeTests": include_tests,
                 },
             ),
