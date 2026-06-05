@@ -23,6 +23,11 @@ dependencies = [
     "neo4j>=5.28.0",
 ]
 
+[project.optional-dependencies]
+compression = [
+    "llmlingua>=0.2.2",
+]
+
 [project.urls]
 Homepage = "https://github.com/ousatov-ua/memgraph-ingester-mcp"
 Repository = "https://github.com/ousatov-ua/memgraph-ingester-mcp"

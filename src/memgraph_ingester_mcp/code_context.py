@@ -92,7 +92,7 @@ class CodeContextMixin:
         )
         paths = [row["path"] for row in file_rows if row.get("path")]
         if not paths:
-            return services._format_response(
+            return self._finalize_response(
                 services._with_result_meta(
                     {
                         "project": project_name,
@@ -186,7 +186,7 @@ class CodeContextMixin:
                 }
             )
 
-        return services._format_response(
+        return self._finalize_response(
             services._with_result_meta(
                 {
                     "project": project_name,
@@ -311,7 +311,7 @@ class CodeContextMixin:
             )
 
         rows_for_meta = semantic_rows + lexical_rows + flow_edges
-        return services._format_response(
+        return self._finalize_response(
             services._with_result_meta(
                 {
                     "project": project_name,

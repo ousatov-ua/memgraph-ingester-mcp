@@ -71,6 +71,18 @@ Use namespaced environment variables so this server does not collide with generi
 | `MEMGRAPH_INGESTER_MCP_READ_ONLY` | `false` | Disable write tools when `true` |
 | `MEMGRAPH_INGESTER_MCP_EMBEDDING_MODEL` | `default` | Metadata stamped on refreshed chunks |
 | `MEMGRAPH_INGESTER_MCP_EMBEDDING_DIMENSIONS` | `384` | Expected memory embedding dimension |
+| `MEMGRAPH_INGESTER_MCP_COMPRESSION_ENABLED` | `false` | Enable optional LLMLingua compression for long free-text response fields |
+| `MEMGRAPH_INGESTER_MCP_COMPRESSION_MODEL` | `microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank` | LLMLingua-2 model name |
+| `MEMGRAPH_INGESTER_MCP_COMPRESSION_DEVICE` | `cpu` | Device passed to LLMLingua, such as `cpu`, `mps`, or `cuda` |
+| `MEMGRAPH_INGESTER_MCP_COMPRESSION_RATE` | `0.5` | Target compression rate for eligible text fields |
+| `MEMGRAPH_INGESTER_MCP_COMPRESSION_MIN_CHARS` | `800` | Minimum string size before LLMLingua is considered |
+| `MEMGRAPH_INGESTER_MCP_COMPRESSION_FAIL_OPEN` | `true` | Return uncompressed output with error metadata if compression fails |
+
+LLMLingua support is an optional extra so default installs stay lightweight:
+
+```bash
+uvx "memgraph-ingester-mcp[compression]"
+```
 
 ## Run Locally
 
@@ -204,4 +216,7 @@ rows are heuristic leads and should be source-verified before claiming a bug. Us
 first for failing test or CI triage. Use `code_lookup_field` for constants and member variables, and `code_lookup_file`
 for indexed source, resource, template, and Cypher path discovery before falling back to text
 search. Use `memory_orientation(compact=true)` for status checks and memory write tools for task
-lifecycle changes and CodeRef links so derived MemoryChunks stay refreshable.
+lifecycle changes and CodeRef links so derived MemoryChunks stay refreshable. When response
+compression is enabled, `meta.compression` records LLMLingua status and the exact response paths
+whose long free-text values were compressed; structural graph facts such as ids, FQNs, paths,
+signatures, line ranges, counts, and table columns are preserved.

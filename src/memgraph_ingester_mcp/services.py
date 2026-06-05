@@ -8,6 +8,7 @@ from hashlib import sha256
 from typing import Any
 
 from memgraph_ingester_mcp.code_context import CodeContextMixin
+from memgraph_ingester_mcp.compression import ResponseCompressor
 from memgraph_ingester_mcp.config import MemgraphConfig
 from memgraph_ingester_mcp.db import MemgraphClient, MemgraphError
 from memgraph_ingester_mcp.schema import (
@@ -580,6 +581,7 @@ class MemgraphIngesterTools(CodeContextMixin):
     def __init__(self, client: MemgraphClient, config: MemgraphConfig) -> None:
         self.client = client
         self.config = config
+        self._response_compressor = ResponseCompressor(config)
 
     def resolve_project(self, project: str | None) -> str:
         resolved = project or self.config.default_project
@@ -588,6 +590,16 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "Project is required. Pass project or set MEMGRAPH_INGESTER_MCP_PROJECT."
             )
         return resolved
+
+    def _finalize_response(
+        self,
+        response: dict[str, Any],
+        output_format: str | None = "json",
+    ) -> dict[str, Any]:
+        return _format_response(
+            self._response_compressor.compress_response(response),
+            output_format,
+        )
 
     def server_status(self, project: str | None = None) -> dict[str, Any]:
         project_name = self.resolve_project(project)
@@ -729,26 +741,27 @@ class MemgraphIngesterTools(CodeContextMixin):
         fetch_limit = (
             min(bounded_limit * fetch_multiplier, 150) if dedupe_by_source else bounded_limit
         )
+        role_projection = "effectiveRole AS ragRole," if include_keys else ""
         return_projection = (
-            """
+            f"""
                    coalesce(chunk.sourceLabel, labels(source)[0]) AS kind,
                    chunk.sourceId AS sourceId,
                    coalesce(source.ownerDisplayName, source.ownerFqn, chunk.ownerFqn) AS owner,
                    coalesce(source.name, chunk.signature, chunk.sourceId) AS name,
                    chunk.path AS path,
-                   effectiveRole AS ragRole,
+                   {role_projection}
                    source.startLine AS startLine, source.endLine AS endLine,
                    round(similarity * 10000) / 10000 AS score,
                    chunk.text AS text
             """
             if include_text
-            else """
+            else f"""
                    coalesce(chunk.sourceLabel, labels(source)[0]) AS kind,
                    chunk.sourceId AS sourceId,
                    coalesce(source.ownerDisplayName, source.ownerFqn, chunk.ownerFqn) AS owner,
                    coalesce(source.name, chunk.signature, chunk.sourceId) AS name,
                    chunk.path AS path,
-                   effectiveRole AS ragRole,
+                   {role_projection}
                    source.startLine AS startLine, source.endLine AS endLine,
                    round(similarity * 10000) / 10000 AS score
             """
@@ -829,7 +842,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 row.pop("sourceId", None)
                 row.pop("ragRole", None)
             row["owner"] = _compact_owner(row.get("owner"), row.get("name"))
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {
                     "project": project_name,
@@ -943,7 +956,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 row.pop("text", None)
             row.pop("ragRole", None)
             row["owner"] = _compact_owner(row.get("owner"), row.get("name"))
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {
                     "project": project_name,
@@ -1029,7 +1042,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 )
                 context["files"] = file_context.get("files", [])
             contexts.append(context)
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {
                     "project": project_name,
@@ -1090,9 +1103,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             else ""
         )
         member_count_cols = (
-            ", methodCount, fieldCount"
-            if (member_summary and not include_members)
-            else ""
+            ", methodCount, fieldCount" if (member_summary and not include_members) else ""
         )
         extra_type_cols = (
             ""
@@ -1178,7 +1189,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                     """,
                     {"project": project_name, "fqn": item_fqn, "limit": bounded_member_limit},
                 )
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {"project": project_name, "types": types},
                 types,
@@ -1226,9 +1237,9 @@ class MemgraphIngesterTools(CodeContextMixin):
             ORDER BY __ORDER_BY__
             SKIP $skip
             LIMIT $limit
-            """
-            .replace("__RETURN_PROJECTION__", return_projection.strip())
-            .replace("__ORDER_BY__", "sortSignature" if compact else "signature"),
+            """.replace("__RETURN_PROJECTION__", return_projection.strip()).replace(
+                "__ORDER_BY__", "sortSignature" if compact else "signature"
+            ),
             {
                 "project": project_name,
                 "fragment": signature_fragment,
@@ -1266,7 +1277,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
         skip_value = _bounded_skip(skip)
         limit_value = _bounded_limit(limit, default=LOOKUP_LIMIT, maximum=200)
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {"project": project_name, "methods": rows},
                 rows,
@@ -1294,7 +1305,6 @@ class MemgraphIngesterTools(CodeContextMixin):
             """
                    field.fqn AS fqn, field.name AS name,
                    coalesce(owner.ownerDisplayName, owner.name, owner.fqn) AS owner,
-                   owner.fqn AS ownerFqn,
                    field.startLine AS startLine, field.endLine AS endLine,
                    files, field.fqn AS sortKey
             """
@@ -1359,7 +1369,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             },
         )
         total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {"project": project_name, "fields": rows},
                 rows,
@@ -1433,7 +1443,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             },
         )
         total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {"project": project_name, "files": rows},
                 rows,
@@ -1606,7 +1616,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         impacts = [self._format_impact_row(row, compact) for row in impact_rows]
         if view == "files":
             file_rows = self._impact_file_rows(targets, impacts)
-            return _format_response(
+            return self._finalize_response(
                 _with_result_meta(
                     {
                         "project": project_name,
@@ -1624,7 +1634,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 ),
                 output_format,
             )
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {
                     "project": project_name,
@@ -1687,9 +1697,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             if row["role"] != "target":
                 if row["minDepth"] == 1 and not impact.get("isTest"):
                     row["risk"] = "high"
-                elif row["risk"] != "high" and (
-                    row["minDepth"] == 1 or impact.get("isTest")
-                ):
+                elif row["risk"] != "high" and (row["minDepth"] == 1 or impact.get("isTest")):
                     row["risk"] = "medium"
         return sorted(
             by_path.values(),
@@ -1808,7 +1816,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 }
                 for row in rows
             ]
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {"project": project_name, "callers": rows},
                 rows,
@@ -1857,7 +1865,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             compact=compact,
             output_format="json",
         )
-        return _format_response(
+        return self._finalize_response(
             {
                 "project": project_name,
                 "fragment": signature_fragment,
@@ -1949,7 +1957,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 }
                 for row in rows
             ]
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {"project": project_name, "callees": rows},
                 rows,
@@ -2076,7 +2084,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                     row.pop("startLine", None)
                     row.pop("endLine", None)
                 rows.append(row)
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {
                     "project": project_name,
@@ -2170,7 +2178,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 )
                 if active
             ]
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {
                     "project": project_name,
@@ -2247,7 +2255,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             )
         )
         rows = rows[:bounded_limit]
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {
                     "project": project_name,
@@ -2375,7 +2383,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             "filesByMethods": files_by_methods,
         }
         response["meta"] = {"limit": bounded_limit}
-        return _format_response(response, output_format)
+        return self._finalize_response(response, output_format)
 
     def code_hierarchy(self, fqn: str, project: str | None = None) -> dict[str, Any]:
         project_name = self.resolve_project(project)
@@ -2536,7 +2544,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "limit": bounded_limit,
             },
         )
-        return _format_response(
+        return self._finalize_response(
             {
                 "project": project_name,
                 "fragment": test_fragment,
@@ -2597,53 +2605,55 @@ class MemgraphIngesterTools(CodeContextMixin):
                        risk.mitigation AS mitigation
             """.strip()
         )
-        return {
-            "project": project_name,
-            "rules": self.client.run(
-                """
+        return self._finalize_response(
+            {
+                "project": project_name,
+                "rules": self.client.run(
+                    """
                 MATCH (m:Memory {project: $project})-[:HAS_RULE]->(rule:Rule)
                 RETURN __RETURN_PROJECTION__
                 ORDER BY rule.severity, rule.id
                 """.replace("__RETURN_PROJECTION__", rule_projection),
-                {"project": project_name},
-            ),
-            "openFindings": self.client.run(
-                """
+                    {"project": project_name},
+                ),
+                "openFindings": self.client.run(
+                    """
                 MATCH (m:Memory {project: $project})-[:HAS_FINDING]->(finding:Finding)
                 WHERE finding.status = 'open'
                 RETURN __RETURN_PROJECTION__
                 ORDER BY finding.id
                 """.replace("__RETURN_PROJECTION__", finding_projection),
-                {"project": project_name},
-            ),
-            "activeTasks": self.client.run(
-                """
+                    {"project": project_name},
+                ),
+                "activeTasks": self.client.run(
+                    """
                 MATCH (m:Memory {project: $project})-[:HAS_TASK]->(task:Task)
                 WHERE task.status IN ['todo', 'doing', 'blocked']
                 RETURN __RETURN_PROJECTION__
                 ORDER BY task.priority, task.status, task.id
                 """.replace("__RETURN_PROJECTION__", task_projection),
-                {"project": project_name},
-            ),
-            "openQuestions": self.client.run(
-                """
+                    {"project": project_name},
+                ),
+                "openQuestions": self.client.run(
+                    """
                 MATCH (m:Memory {project: $project})-[:HAS_QUESTION]->(question:Question)
                 WHERE question.status = 'open'
                 RETURN question.id AS id, question.title AS title
                 ORDER BY question.id
                 """,
-                {"project": project_name},
-            ),
-            "openRisks": self.client.run(
-                """
+                    {"project": project_name},
+                ),
+                "openRisks": self.client.run(
+                    """
                 MATCH (m:Memory {project: $project})-[:HAS_RISK]->(risk:Risk)
                 WHERE risk.status = 'open'
                 RETURN __RETURN_PROJECTION__
                 ORDER BY risk.severity, risk.id
                 """.replace("__RETURN_PROJECTION__", risk_projection),
-                {"project": project_name},
-            ),
-        }
+                    {"project": project_name},
+                ),
+            }
+        )
 
     def memory_schema(self, memory_type: str | None = None) -> dict[str, Any]:
         memory_types = [memory_type] if memory_type is not None else sorted(MEMORY_SPECS)
@@ -2682,7 +2692,13 @@ class MemgraphIngesterTools(CodeContextMixin):
         )
         return {"project": project_name, "query": query, "hits": rows}
 
-    def memory_get(self, memory_id: str, project: str | None = None) -> dict[str, Any]:
+    def memory_get(
+        self,
+        memory_id: str,
+        project: str | None = None,
+        *,
+        finalize: bool = True,
+    ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         rows = self.client.run(
             f"""
@@ -2701,7 +2717,8 @@ class MemgraphIngesterTools(CodeContextMixin):
             """,
             {"project": project_name, "memory_id": memory_id},
         )
-        return {"project": project_name, "memory": rows[0] if rows else None}
+        response = {"project": project_name, "memory": rows[0] if rows else None}
+        return self._finalize_response(response) if finalize else response
 
     def delete_memory(self, memory_id: str, project: str | None = None) -> dict[str, Any]:
         project_name = self.resolve_project(project)
@@ -2721,13 +2738,15 @@ class MemgraphIngesterTools(CodeContextMixin):
             {"project": project_name, "memory_id": memory_id},
         )
         if not rows:
-            return {
-                "project": project_name,
-                "deleted": False,
-                "memory": None,
-                "chunkIds": [],
-                "orphanCodeRefsDeleted": 0,
-            }
+            return self._finalize_response(
+                {
+                    "project": project_name,
+                    "deleted": False,
+                    "memory": None,
+                    "chunkIds": [],
+                    "orphanCodeRefsDeleted": 0,
+                }
+            )
 
         memory = rows[0]
         code_refs = memory.get("codeRefs", [])
@@ -2762,17 +2781,19 @@ class MemgraphIngesterTools(CodeContextMixin):
             )
             orphan_deleted = orphan_rows[0].get("deleted", 0) if orphan_rows else 0
 
-        return {
-            "project": project_name,
-            "deleted": True,
-            "memory": {
-                "labels": memory.get("labels", []),
-                "properties": memory.get("properties", {}),
-            },
-            "chunkIds": memory.get("chunkIds", []),
-            "codeRefs": code_refs,
-            "orphanCodeRefsDeleted": orphan_deleted,
-        }
+        return self._finalize_response(
+            {
+                "project": project_name,
+                "deleted": True,
+                "memory": {
+                    "labels": memory.get("labels", []),
+                    "properties": memory.get("properties", {}),
+                },
+                "chunkIds": memory.get("chunkIds", []),
+                "codeRefs": code_refs,
+                "orphanCodeRefsDeleted": orphan_deleted,
+            }
+        )
 
     def memory_upsert(
         self,
@@ -2818,12 +2839,14 @@ class MemgraphIngesterTools(CodeContextMixin):
                 project_name,
                 embed=embed,
             )
-        return {
-            "project": project_name,
-            "memory": rows[0] if rows else None,
-            "codeRef": link_result,
-            "chunk": chunk_result,
-        }
+        return self._finalize_response(
+            {
+                "project": project_name,
+                "memory": rows[0] if rows else None,
+                "codeRef": link_result,
+                "chunk": chunk_result,
+            }
+        )
 
     def memory_update_status(
         self,
@@ -2856,11 +2879,13 @@ class MemgraphIngesterTools(CodeContextMixin):
                 project_name,
                 embed=embed,
             )
-        return {
-            "project": project_name,
-            "memory": rows[0] if rows else None,
-            "chunk": chunk_result,
-        }
+        return self._finalize_response(
+            {
+                "project": project_name,
+                "memory": rows[0] if rows else None,
+                "chunk": chunk_result,
+            }
+        )
 
     def memory_link_code_ref(
         self,
@@ -2920,7 +2945,7 @@ class MemgraphIngesterTools(CodeContextMixin):
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         spec = _memory_spec(memory_type)
-        memory = self.memory_get(memory_id, project_name).get("memory")
+        memory = self.memory_get(memory_id, project_name, finalize=False).get("memory")
         if memory is None:
             raise MemgraphError(f"Memory node {memory_id!r} was not found.")
 
@@ -3050,7 +3075,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         params.setdefault("project", project_name)
         params.setdefault("limit", bounded_limit)
         rows = self.client.run(query, params)
-        return _format_response(
+        return self._finalize_response(
             _with_result_meta(
                 {"project": project_name, "rows": rows},
                 rows,

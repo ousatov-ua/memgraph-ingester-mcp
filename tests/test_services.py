@@ -1,5 +1,6 @@
 import pytest
 
+from memgraph_ingester_mcp.compression import ResponseCompressor
 from memgraph_ingester_mcp.config import MemgraphConfig
 from memgraph_ingester_mcp.db import MemgraphError
 from memgraph_ingester_mcp.server import create_server
@@ -699,6 +700,47 @@ def test_code_search_can_include_bounded_text():
     assert "chunk.text AS text" in client.calls[0]["query"]
 
 
+def test_code_search_can_compress_long_text_fields_after_compaction():
+    class FakePromptCompressor:
+        def compress_prompt(self, prompt, *, rate, force_tokens):
+            assert "src/main/java/demo/Foo.java" not in prompt
+            assert rate == 0.5
+            assert "\n" in force_tokens
+            return {
+                "compressed_prompt": "compressed source excerpt",
+                "origin_tokens": 100,
+                "compressed_tokens": 20,
+                "ratio": "5.0x",
+                "rate": "20.0%",
+            }
+
+    client = SearchClient()
+    config = MemgraphConfig(
+        default_project="demo",
+        compression_enabled=True,
+        compression_min_chars=100,
+    )
+    tools = MemgraphIngesterTools(client, config)
+    tools._response_compressor = ResponseCompressor(
+        config,
+        factory=FakePromptCompressor,
+    )
+
+    result = tools.code_search(
+        "hot path",
+        include_text=True,
+        text_limit=500,
+        output_format="json",
+    )
+
+    assert result["hits"][0]["path"] == "src/main/java/demo/Foo.java"
+    assert result["hits"][0]["text"] == "compressed source excerpt"
+    assert result["meta"]["compression"]["status"] == "applied"
+    assert result["meta"]["compression"]["compressedPaths"] == ["hits[0].text"]
+    assert result["meta"]["compression"]["stats"]["originTokens"] == 100
+    assert result["meta"]["compression"]["stats"]["compressedTokens"] == 20
+
+
 def test_code_search_can_return_table_json():
     client = SearchClient()
     tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
@@ -925,8 +967,7 @@ def test_registered_code_tool_defaults_are_discovery_sized():
     )
     assert registered["code_lookup_file"].parameters["properties"]["limit"]["default"] == 10
     assert (
-        registered["code_lookup_file"].parameters["properties"]["include_tests"]["default"]
-        is False
+        registered["code_lookup_file"].parameters["properties"]["include_tests"]["default"] is False
     )
     assert registered["code_impact"].parameters["properties"]["limit"]["default"] == 10
     assert registered["code_impact"].parameters["properties"]["depth"]["default"] == 2
@@ -939,9 +980,7 @@ def test_registered_code_tool_defaults_are_discovery_sized():
     context_defaults = registered["code_method_context"].parameters["properties"]
     assert context_defaults["method_limit"]["default"] == 5
     assert context_defaults["include_tests"]["default"] is False
-    assert (
-        context_defaults["neighbor_limit"]["default"] == 5
-    )
+    assert context_defaults["neighbor_limit"]["default"] == 5
     assert registered["code_hot_paths"].parameters["properties"]["limit"]["default"] == 5
     assert registered["code_operation_hot_paths"].parameters["properties"]["limit"]["default"] == 5
     assert "owner_fragment" in registered["code_operation_hot_paths"].parameters["properties"]

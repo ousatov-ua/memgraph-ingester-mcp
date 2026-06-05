@@ -47,6 +47,13 @@ class MemgraphConfig:
     read_only: bool = False
     embedding_model_name: str = "default"
     embedding_dimensions: int = 384
+    compression_enabled: bool = False
+    compression_provider: str = "llmlingua"
+    compression_model_name: str = "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank"
+    compression_device: str = "cpu"
+    compression_rate: float = 0.5
+    compression_min_chars: int = 800
+    compression_fail_open: bool = True
 
     @classmethod
     def from_environment(cls) -> MemgraphConfig:
@@ -70,5 +77,33 @@ class MemgraphConfig:
             embedding_dimensions=_int_env(
                 "MEMGRAPH_INGESTER_MCP_EMBEDDING_DIMENSIONS",
                 cls.embedding_dimensions,
+            ),
+            compression_enabled=_bool_env(
+                "MEMGRAPH_INGESTER_MCP_COMPRESSION_ENABLED",
+                cls.compression_enabled,
+            ),
+            compression_provider=getenv(
+                "MEMGRAPH_INGESTER_MCP_COMPRESSION_PROVIDER",
+                cls.compression_provider,
+            ),
+            compression_model_name=getenv(
+                "MEMGRAPH_INGESTER_MCP_COMPRESSION_MODEL",
+                cls.compression_model_name,
+            ),
+            compression_device=getenv(
+                "MEMGRAPH_INGESTER_MCP_COMPRESSION_DEVICE",
+                cls.compression_device,
+            ),
+            compression_rate=_float_env(
+                "MEMGRAPH_INGESTER_MCP_COMPRESSION_RATE",
+                cls.compression_rate,
+            ),
+            compression_min_chars=_int_env(
+                "MEMGRAPH_INGESTER_MCP_COMPRESSION_MIN_CHARS",
+                cls.compression_min_chars,
+            ),
+            compression_fail_open=_bool_env(
+                "MEMGRAPH_INGESTER_MCP_COMPRESSION_FAIL_OPEN",
+                cls.compression_fail_open,
             ),
         )
