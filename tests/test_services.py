@@ -407,7 +407,6 @@ class UniversalFlowClient:
                     {
                         "owner": "Writer",
                         "name": "refresh",
-                        "signature": "demo.Writer.refresh()",
                         "path": "src/main/java/demo/Writer.java",
                         "startLine": 10,
                         "endLine": 20,
@@ -421,7 +420,6 @@ class UniversalFlowClient:
                 {
                     "owner": "WriterTest",
                     "name": "refreshes",
-                    "signature": "demo.WriterTest.refreshes()",
                     "path": "src/test/java/demo/WriterTest.java",
                     "startLine": 30,
                     "endLine": 40,
@@ -522,7 +520,6 @@ class CodeContextClient:
                     "path": "src/main/java/demo/Writer.java",
                     "owner": "Writer",
                     "name": "refresh",
-                    "signature": "demo.Writer.refresh()",
                     "startLine": 10,
                     "endLine": 40,
                 },
@@ -530,7 +527,6 @@ class CodeContextClient:
                     "path": "src/main/java/demo/Orchestrator.java",
                     "owner": "Orchestrator",
                     "name": "run",
-                    "signature": "demo.Orchestrator.run()",
                     "startLine": 50,
                     "endLine": 90,
                 },
@@ -541,7 +537,6 @@ class CodeContextClient:
                     "path": "src/main/java/demo/Writer.java",
                     "owner": "Writer",
                     "name": "cypher",
-                    "fqn": "demo.Writer.cypher",
                     "startLine": 7,
                     "endLine": 7,
                 }
@@ -639,7 +634,7 @@ def test_code_lookup_type_can_return_table_json():
             ["src/main/java/demo/Foo.java"],
         ]
     ]
-    assert result["meta"]["format"] == "table_json"
+    assert "format" not in result["meta"]
 
 
 def test_code_lookup_type_compact_omits_low_value_type_fields():
@@ -690,7 +685,7 @@ def test_code_search_omits_text_and_dedupes_by_default():
     assert "text" not in result["hits"][0]
     assert "chunk.text AS text" not in client.calls[0]["query"]
     assert client.calls[0]["parameters"]["rag_roles"] == ["primary", "file"]
-    assert result["meta"]["hasMore"] is False
+    assert "hasMore" not in result["meta"]
 
 
 def test_code_search_demotes_synthetic_methods_before_stored_rag_role():
@@ -764,7 +759,7 @@ def test_code_search_can_return_table_json():
             0.9,
         ]
     ]
-    assert result["meta"]["format"] == "table_json"
+    assert "format" not in result["meta"]
 
 
 def test_code_search_can_include_keys_and_filters():
@@ -803,7 +798,6 @@ def test_code_text_search_returns_compact_hits():
 
     assert result["hits"]["cols"] == [
         "kind",
-        "sourceId",
         "owner",
         "name",
         "path",
@@ -813,8 +807,8 @@ def test_code_text_search_returns_compact_hits():
     ]
     assert client.calls[0]["parameters"]["rag_roles"] == ["primary", "file"]
     assert client.calls[0]["parameters"]["search_terms"] == ["stale", "chunks"]
-    assert result["hits"]["rows"][0][3] == "refresh"
-    assert result["meta"]["format"] == "table_json"
+    assert result["hits"]["rows"][0][2] == "refresh"
+    assert "format" not in result["meta"]
 
 
 def test_code_text_search_demotes_synthetic_methods_before_stored_rag_role():
@@ -871,8 +865,8 @@ def test_code_file_context_returns_compact_file_outlines():
         "rows": [["primary", 3]],
     }
     assert writer_row[5]["rows"] == [["Class", "Writer", "demo.Writer", "class", 1, 80]]
-    assert writer_row[6]["rows"] == [["Writer", "refresh", "demo.Writer.refresh()", 10, 40]]
-    assert writer_row[7]["rows"] == [["Writer", "cypher", "demo.Writer.cypher", 7, 7]]
+    assert writer_row[6]["rows"] == [["Writer", "refresh", 10, 40]]
+    assert writer_row[7]["rows"] == [["Writer", "cypher", 7, 7]]
     assert client.calls[0]["parameters"]["fragments"] == ["Writer.java", "Orchestrator.java"]
 
 
@@ -890,16 +884,14 @@ def test_code_flow_context_bundles_anchors_files_and_edges():
 
     assert result["anchors"]["cols"] == [
         "kind",
-        "sourceId",
         "owner",
         "name",
         "path",
-        "ragRole",
         "startLine",
         "endLine",
         "score",
     ]
-    assert result["lexicalAnchors"]["rows"][0][3] == "run"
+    assert result["lexicalAnchors"]["rows"][0][2] == "run"
     assert result["files"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
     assert result["flowEdges"]["rows"] == [
         [
@@ -915,7 +907,7 @@ def test_code_flow_context_bundles_anchors_files_and_edges():
     ]
     assert " AS caller," not in client.calls[-1]["query"]
     assert " AS callee," not in client.calls[-1]["query"]
-    assert result["meta"]["lexicalTerms"] == ["refresh", "stale", "code", "chunks"]
+    assert "lexicalTerms" not in result["meta"]
     edge_call = client.calls[-1]
     assert "(callerFile.path IN $paths OR calleeFile.path IN $paths)" in edge_call["query"]
     assert edge_call["parameters"]["include_tests"] is False
@@ -936,7 +928,7 @@ def test_code_flow_context_promotes_non_selected_edge_endpoint_files():
 
     assert result["files"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
     assert result["relatedFiles"]["rows"][0][0] == "src/main/java/demo/Writer.java"
-    assert result["meta"]["detail"] == "compact"
+    assert "detail" not in result["meta"]
 
 
 def test_code_flow_context_defaults_are_compact():
@@ -945,7 +937,7 @@ def test_code_flow_context_defaults_are_compact():
 
     result = tools.code_flow_context("refresh stale code chunks")
 
-    assert result["meta"]["detail"] == "compact"
+    assert "detail" not in result["meta"]
     edge_calls = [
         call
         for call in client.calls
@@ -965,7 +957,7 @@ def test_code_flow_context_full_detail_keeps_expanded_edges_and_related_files():
         detail="full",
     )
 
-    assert result["meta"]["detail"] == "full"
+    assert "detail" not in result["meta"]
 
 
 def test_table_json_rejects_unknown_format():
@@ -1092,7 +1084,7 @@ def test_code_callers_can_return_table_json():
             "b",
         ]
     ]
-    assert result["meta"]["format"] == "table_json"
+    assert "format" not in result["meta"]
 
 
 def test_code_callees_can_return_legacy_shape():
@@ -1143,7 +1135,7 @@ def test_code_callees_compact_can_return_table_json():
     assert result["callees"]["rows"] == [
         ["Foo", "a", "Bar", "b", "src/main/java/demo/Bar.java", 30, 40]
     ]
-    assert result["meta"]["format"] == "table_json"
+    assert "format" not in result["meta"]
 
 
 def test_code_method_context_bundles_methods_callers_and_callees():
@@ -1174,10 +1166,10 @@ def test_code_method_context_bundles_methods_callers_and_callees():
         "startLine",
         "endLine",
     ]
-    assert "hasMore" in result["meta"]["methods"]
-    assert "hasMore" in result["meta"]["callers"]
-    assert "hasMore" in result["meta"]["callees"]
-    assert result["meta"]["format"] == "table_json"
+    assert "hasMore" not in result["meta"]["methods"]
+    assert result["meta"]["callers"]["hasMore"] is True
+    assert result["meta"]["callees"]["hasMore"] is True
+    assert "format" not in result["meta"]
 
 
 def test_code_orientation_runs_only_requested_sections():
@@ -1237,7 +1229,7 @@ def test_code_hot_paths_can_return_table_json():
         [True, "longestMethods"],
         [True, "fanIn"],
     ]
-    assert result["meta"]["format"] == "table_json"
+    assert "format" not in result["meta"]
 
 
 def test_code_quality_stats_returns_aggregate_sections():
@@ -1245,7 +1237,7 @@ def test_code_quality_stats_returns_aggregate_sections():
 
     result = tools.code_quality_stats(limit=3)
 
-    assert result["project"] == "demo"
+    assert "project" not in result
     assert "inventory" in result
     assert "methodLengths" in result
     assert "fanIn" in result
@@ -1262,7 +1254,7 @@ def test_code_quality_stats_can_return_table_json_sections():
     assert result["chunksByLabel"] == {"cols": ["ok"], "rows": [[True]]}
     assert result["filesByMethods"] == {"cols": ["ok"], "rows": [[True]]}
     assert result["methodLengths"] == {"ok": True}
-    assert result["meta"]["format"] == "table_json"
+    assert "format" not in result["meta"]
 
 
 def test_memory_schema_lists_fields_controlled_values_and_targets():
@@ -1451,7 +1443,7 @@ def test_raw_read_cypher_can_return_table_json():
     )
 
     assert result["rows"] == {"cols": ["ok"], "rows": [[True]]}
-    assert result["meta"]["format"] == "table_json"
+    assert "format" not in result["meta"]
 
 
 def test_code_lookup_type_orders_by_return_alias_after_collect():
@@ -1499,7 +1491,7 @@ def test_code_lookup_methods_can_return_table_json():
         "cols": ["owner", "name", "path", "startLine", "endLine"],
         "rows": [["GraphWriter", "upsertFile", "src/main/java/demo/GraphWriter.java", 10, 20]],
     }
-    assert result["meta"]["format"] == "table_json"
+    assert "format" not in result["meta"]
 
 
 def test_code_lookup_field_can_return_table_json():
@@ -1521,7 +1513,7 @@ def test_code_lookup_field_can_return_table_json():
             ]
         ],
     }
-    assert result["meta"]["format"] == "table_json"
+    assert "format" not in result["meta"]
 
 
 def test_code_lookup_file_can_return_table_json():
@@ -1534,7 +1526,7 @@ def test_code_lookup_file_can_return_table_json():
         "cols": ["path", "language", "definitionCount", "chunkCount"],
         "rows": [["src/main/java/demo/GraphWriter.java", "java", 4, 9]],
     }
-    assert result["meta"]["format"] == "table_json"
+    assert "format" not in result["meta"]
 
 
 def test_code_impact_returns_targets_and_boundary_flags():
@@ -1586,7 +1578,7 @@ def test_code_impact_returns_targets_and_boundary_flags():
     ]
     assert result["impacts"]["rows"][1][10:] == [True, True]
     assert "targetCount" not in result["meta"]
-    assert result["meta"]["format"] == "table_json"
+    assert "format" not in result["meta"]
 
 
 def test_code_impact_can_return_file_view():
@@ -1662,7 +1654,6 @@ def test_code_resource_risk_scan_returns_compact_resource_risks():
         "evidence",
         "why",
         "occurrences",
-        "heuristic",
     ]
     patterns = [row[4] for row in result["resourceRisks"]["rows"]]
     assert "per-row-unbounded-traversal" in patterns
@@ -1680,7 +1671,6 @@ def test_code_test_context_returns_tests_and_production_callees():
     assert result["tests"]["cols"] == [
         "owner",
         "name",
-        "signature",
         "path",
         "startLine",
         "endLine",

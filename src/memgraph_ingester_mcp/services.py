@@ -223,7 +223,6 @@ def _resource_risk_rows(path: str, language: str | None, text: str) -> list[dict
                 "evidence": _compact_text(evidence.strip(), 180),
                 "why": why,
                 "occurrences": 1,
-                "heuristic": True,
             }
         )
 
@@ -450,9 +449,6 @@ def _format_response(
     if not isinstance(formatted, dict):  # pragma: no cover - response is always a dict today.
         raise MemgraphError("Formatted response must be an object.")
 
-    meta = formatted.setdefault("meta", {})
-    if isinstance(meta, dict):
-        meta["format"] = normalized
     return formatted
 
 
@@ -469,7 +465,7 @@ def _with_result_meta(
     total = returned_count if total_count is None else total_count
     next_skip = skip + returned_count
     has_more = next_skip < total
-    meta: dict[str, Any] = {"hasMore": has_more}
+    meta: dict[str, Any] = {"hasMore": True} if has_more else {}
     if has_more:
         meta["nextSkip"] = next_skip
     if total_count is not None and total > returned_count:
@@ -607,10 +603,12 @@ class MemgraphIngesterTools(CodeContextMixin):
         response: dict[str, Any],
         output_format: str | None = "json",
     ) -> dict[str, Any]:
-        return _format_response(
+        result = _format_response(
             self._response_compressor.compress_response(response),
             output_format,
         )
+        result.pop("project", None)
+        return result
 
     def server_status(self, project: str | None = None) -> dict[str, Any]:
         project_name = self.resolve_project(project)
@@ -949,6 +947,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             else:
                 row.pop("text", None)
             row.pop("ragRole", None)
+            row.pop("sourceId", None)
             row["owner"] = _compact_owner(row.get("owner"), row.get("name"))
         return self._finalize_response(
             _with_result_meta(
@@ -1026,12 +1025,10 @@ class MemgraphIngesterTools(CodeContextMixin):
             _with_result_meta(
                 {
                     "project": project_name,
-                    "query": query,
                     "contexts": contexts,
                 },
                 contexts,
                 limit=bounded_limit,
-                extra={"neighborLimit": bounded_neighbor_limit},
             ),
             output_format,
         )
@@ -2316,7 +2313,6 @@ class MemgraphIngesterTools(CodeContextMixin):
         )
         response = {
             "project": project_name,
-            "includeTests": include_tests,
             "inventory": inventory,
             "methodLengths": method_lengths[0] if method_lengths else {},
             "fanOut": fan_out[0] if fan_out else {},
@@ -2407,14 +2403,13 @@ class MemgraphIngesterTools(CodeContextMixin):
                 OR termMatches >= $min_term_matches)
             RETURN test.ownerDisplayName AS owner,
                    test.name AS name,
-                   test.signature AS signature,
                    file.path AS path,
                    test.startLine AS startLine,
                    test.endLine AS endLine,
                    CASE WHEN test.signature CONTAINS $fragment OR test.name = $fragment
                         THEN true ELSE false END AS exactish,
                    termMatches
-            ORDER BY exactish DESC, termMatches DESC, path, startLine, signature
+            ORDER BY exactish DESC, termMatches DESC, path, startLine, name
             LIMIT $limit
             """,
             {
@@ -2448,13 +2443,12 @@ class MemgraphIngesterTools(CodeContextMixin):
                 OR termMatches >= $min_term_matches)
             RETURN DISTINCT callee.ownerDisplayName AS owner,
                    callee.name AS name,
-                   callee.signature AS signature,
                    calleeFile.path AS path,
                    callee.startLine AS startLine,
                    callee.endLine AS endLine,
                    test.ownerDisplayName AS testOwner,
                    test.name AS testName
-            ORDER BY path, startLine, signature
+            ORDER BY path, startLine, name
             LIMIT $limit
             """,
             {
@@ -2489,8 +2483,12 @@ class MemgraphIngesterTools(CodeContextMixin):
         )
         exact_matches = sum(1 for row in rows if row.get("exactish"))
         for row in rows:
+            row.pop("signature", None)
             row.pop("exactish", None)
             row.pop("termMatches", None)
+        production_rows = [r for r in production_rows if r.get("name") != "<init>"]
+        for row in production_rows:
+            row.pop("signature", None)
         return self._finalize_response(
             {
                 "project": project_name,

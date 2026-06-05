@@ -96,15 +96,10 @@ class CodeContextMixin:
                 services._with_result_meta(
                     {
                         "project": project_name,
-                        "pathFragments": fragments,
                         "files": [],
                     },
                     [],
                     limit=bounded_file_limit,
-                    extra={
-                        "symbolLimit": bounded_symbol_limit,
-                        "includeTests": include_tests,
-                    },
                 ),
                 output_format,
             )
@@ -131,10 +126,9 @@ class CodeContextMixin:
             RETURN file.path AS path,
                    method.ownerDisplayName AS owner,
                    method.name AS name,
-                   method.signature AS signature,
                    method.startLine AS startLine,
                    method.endLine AS endLine
-            ORDER BY file.path, method.startLine, method.signature
+            ORDER BY file.path, method.startLine, method.name
             """,
             {"project": project_name, "paths": paths},
         )
@@ -145,10 +139,9 @@ class CodeContextMixin:
             RETURN file.path AS path,
                    coalesce(field.ownerDisplayName, field.ownerFqn) AS owner,
                    field.name AS name,
-                   field.fqn AS fqn,
                    field.startLine AS startLine,
                    field.endLine AS endLine
-            ORDER BY file.path, field.startLine, field.fqn
+            ORDER BY file.path, field.startLine, field.name
             """,
             {"project": project_name, "paths": paths},
         )
@@ -165,6 +158,10 @@ class CodeContextMixin:
             {"project": project_name, "paths": paths},
         )
 
+        for row in method_rows:
+            row.pop("signature", None)
+        for row in field_rows:
+            row.pop("fqn", None)
         types_by_path = _group_limited(type_rows, limit=bounded_symbol_limit)
         methods_by_path = _group_limited(method_rows, limit=bounded_symbol_limit)
         fields_by_path = _group_limited(field_rows, limit=bounded_symbol_limit)
@@ -190,15 +187,10 @@ class CodeContextMixin:
             services._with_result_meta(
                 {
                     "project": project_name,
-                    "pathFragments": fragments,
                     "files": files,
                 },
                 files,
                 limit=bounded_file_limit,
-                extra={
-                    "symbolLimit": bounded_symbol_limit,
-                    "includeTests": include_tests,
-                },
             ),
             output_format,
         )
@@ -238,7 +230,6 @@ class CodeContextMixin:
             limit=bounded_anchor_limit,
             include_tests=include_tests,
             include_text=False,
-            include_keys=True,
             output_format="json",
         )
         semantic_rows = list(semantic.get("hits", []))
@@ -369,14 +360,10 @@ class CodeContextMixin:
                 related_files = related_context["files"]
 
         rows_for_meta = semantic_rows + lexical_rows + flow_edges + related_files
-        extra: dict[str, Any] = {"detail": normalized_detail}
-        if lexical_terms:
-            extra["lexicalTerms"] = lexical_terms
         return self._finalize_response(
             services._with_result_meta(
                 {
                     "project": project_name,
-                    "query": query,
                     "anchors": semantic_rows,
                     "lexicalAnchors": lexical_rows,
                     "files": files,
@@ -385,7 +372,6 @@ class CodeContextMixin:
                 },
                 rows_for_meta,
                 limit=bounded_anchor_limit,
-                extra=extra,
             ),
             output_format,
         )
