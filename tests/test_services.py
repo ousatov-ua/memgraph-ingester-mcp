@@ -781,7 +781,7 @@ def test_code_search_can_include_secondary_chunks():
     client = SearchClient()
     tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
 
-    result = tools.code_search("hot path", include_secondary=True)
+    tools.code_search("hot path", include_secondary=True)
 
     assert client.calls[0]["parameters"]["rag_roles"] == []
 

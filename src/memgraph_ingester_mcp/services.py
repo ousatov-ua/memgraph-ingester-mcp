@@ -831,7 +831,6 @@ class MemgraphIngesterTools(CodeContextMixin):
                 continue
             filtered_rows.append(row)
         rows = filtered_rows
-        discovery_complete = len(raw_rows) < fetch_limit
         if dedupe_by_source:
             deduped: list[dict[str, Any]] = []
             seen: set[tuple[str, str]] = set()
@@ -1686,7 +1685,6 @@ class MemgraphIngesterTools(CodeContextMixin):
 
     def _format_impact_row(self, row: dict[str, Any], compact: bool) -> dict[str, Any]:
         caller_path = row.get("callerPath")
-        target_path = row.get("targetPath")
         caller_package = _package_name(row.get("callerOwnerFqn"))
         target_package = _package_name(row.get("targetOwnerFqn"))
         enriched = dict(row)
@@ -2387,7 +2385,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             default=DISCOVERY_LIMIT,
             maximum=50,
         )
-        owner_fragment, method_fragment, terms, min_term_matches = _test_fragment_parts(
+        owner_fragment, _method_fragment, terms, min_term_matches = _test_fragment_parts(
             test_fragment,
         )
         rows = self.client.run(
