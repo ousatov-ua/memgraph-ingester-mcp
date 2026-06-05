@@ -1,5 +1,12 @@
 # memgraph-ingester-mcp
 
+[![Visitors](https://visitor-badge.laobi.icu/badge?page_id=ousatov-ua.memgraph-ingester-mcp)](https://github.com/ousatov-ua/memgraph-ingester-mcp)
+[![GitHub commits](https://img.shields.io/github/commit-activity/t/ousatov-ua/memgraph-ingester-mcp)](https://github.com/ousatov-ua/memgraph-ingester-mcp/commits/main)
+[![GitHub last commit](https://img.shields.io/github/last-commit/ousatov-ua/memgraph-ingester-mcp)](https://github.com/ousatov-ua/memgraph-ingester-mcp/commits/main)
+[![PyPI release](https://img.shields.io/pypi/v/memgraph-ingester-mcp)](https://pypi.org/project/memgraph-ingester-mcp/)
+[![Python versions](https://img.shields.io/pypi/pyversions/memgraph-ingester-mcp)](https://pypi.org/project/memgraph-ingester-mcp/)
+[![License](https://img.shields.io/pypi/l/memgraph-ingester-mcp)](https://github.com/ousatov-ua/memgraph-ingester-mcp/blob/main/LICENSE)
+
 `memgraph-ingester-mcp` exposes safe, high-level MCP tools for Memgraph graphs produced by
 [`memgraph-ingester`](https://github.com/ousatov-ua/memgraph-ingester). It keeps agents out of long
 Cypher instruction blocks for normal work while still offering a project-scoped read-only Cypher
