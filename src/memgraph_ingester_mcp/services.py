@@ -790,6 +790,8 @@ class MemgraphIngesterTools(CodeContextMixin):
                      AND coalesce(source.startLine, 0) <= 0 THEN 'synthetic'
                    WHEN chunk.sourceLabel = 'Class'
                      AND coalesce(chunk.kind, source.kind, '') = 'module' THEN 'synthetic'
+                   WHEN chunk.sourceLabel = 'Method'
+                     AND coalesce(chunk.kind, '') = 'constructor' THEN 'secondary'
                    WHEN chunk.sourceLabel = 'Field' THEN 'secondary'
                    WHEN chunk.sourceLabel = 'File' THEN 'file'
                    ELSE coalesce(chunk.ragRole, 'primary')
@@ -905,6 +907,8 @@ class MemgraphIngesterTools(CodeContextMixin):
                      AND coalesce(source.startLine, 0) <= 0 THEN 'synthetic'
                    WHEN chunk.sourceLabel = 'Class'
                      AND coalesce(chunk.kind, source.kind, '') = 'module' THEN 'synthetic'
+                   WHEN chunk.sourceLabel = 'Method'
+                     AND coalesce(chunk.kind, '') = 'constructor' THEN 'secondary'
                    WHEN chunk.sourceLabel = 'Field' THEN 'secondary'
                    WHEN chunk.sourceLabel = 'File' THEN 'file'
                    ELSE coalesce(chunk.ragRole, 'primary')
