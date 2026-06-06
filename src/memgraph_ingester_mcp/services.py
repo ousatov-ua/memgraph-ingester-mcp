@@ -781,7 +781,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         search_query = """
             CALL embeddings.text([$query], {}) YIELD embeddings
             WITH embeddings[0] AS queryVector
-            CALL vector_search.search('code_chunk_embedding_v1', $limit, queryVector)
+            CALL vector_search.search('code_chunk_embedding_v2', $limit, queryVector)
             YIELD node AS chunk, similarity
             WITH chunk, similarity
             WHERE chunk.project = $project
@@ -2615,7 +2615,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             """
             CALL embeddings.text([$query], {}) YIELD embeddings
             WITH embeddings[0] AS queryVector
-            CALL vector_search.search('memory_chunk_embedding_v1', $limit, queryVector)
+            CALL vector_search.search('memory_chunk_embedding_v2', $limit, queryVector)
             YIELD node AS chunk, similarity
             WITH chunk, similarity
             WHERE chunk.project = $project
