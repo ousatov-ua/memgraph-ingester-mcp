@@ -70,6 +70,8 @@ Use namespaced environment variables so this server does not collide with generi
 | `MEMGRAPH_INGESTER_MCP_PROJECT` | unset | Default project name |
 | `MEMGRAPH_INGESTER_MCP_QUERY_TIMEOUT_SECONDS` | `30` | Query timeout |
 | `MEMGRAPH_INGESTER_MCP_READ_ONLY` | `false` | Disable write tools when `true` |
+| `MEMGRAPH_INGESTER_MCP_CODE_EMBEDDING_INDEX` | `code_chunk_embedding_v2` | Base CodeChunk vector index name configured in `memgraph-ingester` |
+| `MEMGRAPH_INGESTER_MCP_MEMORY_EMBEDDING_INDEX` | `memory_chunk_embedding_v2` | Base MemoryChunk vector index name configured in `memgraph-ingester` |
 | `MEMGRAPH_INGESTER_MCP_EMBEDDING_MODEL` | `default` | Metadata stamped on refreshed chunks |
 | `MEMGRAPH_INGESTER_MCP_EMBEDDING_DIMENSIONS` | `384` | Expected memory embedding dimension |
 

@@ -1,9 +1,12 @@
+import asyncio
+import json
+
 import pytest
 
 from memgraph_ingester_mcp.config import MemgraphConfig
 from memgraph_ingester_mcp.db import MemgraphError
-from memgraph_ingester_mcp.server import create_server
-from memgraph_ingester_mcp.services import MemgraphIngesterTools
+from memgraph_ingester_mcp.server import _compact_json_response, create_server
+from memgraph_ingester_mcp.services import MemgraphIngesterTools, _project_vector_index_name
 
 
 class FakeClient:
@@ -91,6 +94,19 @@ class FakeClient:
                 }
             ]
 
+        if "RETURN inventory, methodLengths" in query:
+            return [
+                {
+                    "inventory": [{"ok": True}],
+                    "methodLengths": {"ok": True},
+                    "fanOut": {"ok": True},
+                    "fanIn": {"ok": True},
+                    "typeSizes": {"ok": True},
+                    "chunksByLabel": [{"ok": True}],
+                    "filesByMethods": [{"ok": True}],
+                }
+            ]
+
         if "WHERE method.signature CONTAINS $fragment" in query:
             if "RETURN count(method) AS count" in query:
                 return [{"count": 1}]
@@ -107,8 +123,49 @@ class FakeClient:
         return [{"ok": True}]
 
 
+class StatusClient:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, query, parameters=None, *, write=False):
+        self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
+        if query == "SHOW VECTOR INDEX INFO":
+            return [
+                {"index_name": "code_chunk_embedding_v2"},
+                {"index_name": "memory_chunk_embedding_v2"},
+                {"index_name": "memory_chunk_embedding_v2_p_demo_2a97516c354b"},
+                {"index_name": "unrelated_index"},
+            ]
+        if "RETURN size(languages) AS languageCount" in query:
+            return [{"languageCount": 0, "fileCount": 0, "typeCount": 0, "methodCount": 0}]
+        return []
+
+
 def make_tools():
     return MemgraphIngesterTools(FakeClient(), MemgraphConfig(default_project="demo"))
+
+
+def test_project_vector_index_name_matches_ingester_derivation():
+    assert (
+        _project_vector_index_name("code_chunk_embedding_v2", "My Project!")
+        == "code_chunk_embedding_v2_p_my_project_cfad424950cd"
+    )
+    assert _project_vector_index_name("idx", "MyProject") == "idx_p_myproject_2399f4e9bd5f"
+
+
+def test_compact_json_response_serializes_database_temporal_values():
+    class TemporalValue:
+        def __str__(self):
+            return "2026-06-08T21:18:39Z"
+
+    assert (
+        _compact_json_response({"createdAt": TemporalValue()})
+        == '{"createdAt":"2026-06-08T21:18:39Z"}'
+    )
+
+
+def vector_search_call(client):
+    return next(call for call in client.calls if "CALL vector_search.search" in call["query"])
 
 
 class CodeLookupClient:
@@ -155,6 +212,8 @@ class SearchClient:
 
     def run(self, query, parameters=None, *, write=False):
         self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
+        if query == "SHOW VECTOR INDEX INFO":
+            return [{"index_name": "code_chunk_embedding_v2_p_demo_2a97516c354b"}]
         return [
             {
                 "kind": "Method",
@@ -178,6 +237,37 @@ class SearchClient:
                 "score": 0.8,
                 "text": "duplicate",
             },
+        ]
+
+
+class LegacySearchClient(SearchClient):
+    def run(self, query, parameters=None, *, write=False):
+        if query == "SHOW VECTOR INDEX INFO":
+            self.calls.append(
+                {"query": query, "parameters": dict(parameters or {}), "write": write}
+            )
+            return [{"index_name": "code_chunk_embedding_v2"}]
+        return super().run(query, parameters, write=write)
+
+
+class MemorySearchClient:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, query, parameters=None, *, write=False):
+        self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
+        if query == "SHOW VECTOR INDEX INFO":
+            return [{"index_name": "memory_chunk_embedding_v2_p_demo_2a97516c354b"}]
+        return [
+            {
+                "type": ["Task"],
+                "id": "TASK-demo",
+                "title": "Demo",
+                "status": "doing",
+                "sourceLabel": "Task",
+                "sourceId": "TASK-demo",
+                "similarity": 0.88,
+            }
         ]
 
 
@@ -474,6 +564,75 @@ class CodeContextClient:
                     "endLine": 90,
                 }
             ]
+        if "chunkRoles" in query and "MATCH (file:File" in query:
+            rows = [
+                {
+                    "path": "src/main/java/demo/Writer.java",
+                    "language": "java",
+                    "definitionCount": 3,
+                    "chunkCount": 6,
+                    "chunkRoles": [
+                        {"ragRole": "primary", "count": 3},
+                        {"ragRole": "file", "count": 1},
+                    ],
+                    "types": [
+                        {
+                            "label": "Class",
+                            "name": "Writer",
+                            "fqn": "demo.Writer",
+                            "kind": "class",
+                            "startLine": 1,
+                            "endLine": 80,
+                        }
+                    ],
+                    "methods": [
+                        {
+                            "owner": "Writer",
+                            "name": "refresh",
+                            "startLine": 10,
+                            "endLine": 40,
+                        }
+                    ],
+                    "fields": [
+                        {
+                            "owner": "Writer",
+                            "name": "cypher",
+                            "startLine": 7,
+                            "endLine": 7,
+                        }
+                    ],
+                },
+                {
+                    "path": "src/main/java/demo/Orchestrator.java",
+                    "language": "java",
+                    "definitionCount": 2,
+                    "chunkCount": 4,
+                    "chunkRoles": [{"ragRole": "primary", "count": 2}],
+                    "types": [
+                        {
+                            "label": "Class",
+                            "name": "Orchestrator",
+                            "fqn": "demo.Orchestrator",
+                            "kind": "class",
+                            "startLine": 1,
+                            "endLine": 120,
+                        }
+                    ],
+                    "methods": [
+                        {
+                            "owner": "Orchestrator",
+                            "name": "run",
+                            "startLine": 50,
+                            "endLine": 90,
+                        }
+                    ],
+                    "fields": [],
+                },
+            ]
+            fragments = params.get("fragments") or []
+            if not fragments:
+                return rows
+            return [row for row in rows if any(fragment in row["path"] for fragment in fragments)]
         if "definitionCount" in query and "MATCH (file:File" in query:
             rows = [
                 {
@@ -683,8 +842,14 @@ def test_code_search_omits_text_and_dedupes_by_default():
 
     assert len(result["hits"]) == 1
     assert "text" not in result["hits"][0]
-    assert "chunk.text AS text" not in client.calls[0]["query"]
-    assert client.calls[0]["parameters"]["rag_roles"] == ["primary", "file"]
+    call = vector_search_call(client)
+    assert "chunk.text AS text" not in call["query"]
+    assert "CALL vector_search.search($index, $limit, queryVector)" in call["query"]
+    assert (
+        call["parameters"]["index"]
+        == "code_chunk_embedding_v2_p_demo_2a97516c354b"
+    )
+    assert call["parameters"]["rag_roles"] == ["primary", "file"]
     assert "hasMore" not in result["meta"]
 
 
@@ -694,7 +859,7 @@ def test_code_search_demotes_synthetic_methods_before_stored_rag_role():
 
     tools.code_search("hot path")
 
-    query = client.calls[0]["query"]
+    query = vector_search_call(client)["query"]
     assert "coalesce(source.startLine, 0) <= 0" in query
     synthetic_index = query.index("THEN 'synthetic'")
     stored_role_index = query.index("ELSE coalesce(chunk.ragRole, 'primary')")
@@ -709,7 +874,7 @@ def test_code_search_can_include_bounded_text():
 
     assert result["hits"][0]["text"].endswith("...")
     assert len(result["hits"][0]["text"]) <= 23
-    assert "chunk.text AS text" in client.calls[0]["query"]
+    assert "chunk.text AS text" in vector_search_call(client)["query"]
 
 
 def test_code_search_compression_hook_is_noop():
@@ -783,7 +948,43 @@ def test_code_search_can_include_secondary_chunks():
 
     tools.code_search("hot path", include_secondary=True)
 
-    assert client.calls[0]["parameters"]["rag_roles"] == []
+    assert vector_search_call(client)["parameters"]["rag_roles"] == []
+
+
+def test_code_search_falls_back_to_configured_base_vector_index():
+    client = LegacySearchClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    tools.code_search("hot path")
+
+    assert vector_search_call(client)["parameters"]["index"] == "code_chunk_embedding_v2"
+
+
+def test_server_status_prefers_project_vector_indexes_and_falls_back_to_base():
+    client = StatusClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.server_status()
+
+    assert [row["index_name"] for row in result["vectorIndexes"]] == [
+        "code_chunk_embedding_v2",
+        "memory_chunk_embedding_v2_p_demo_2a97516c354b",
+    ]
+
+
+def test_memory_search_uses_project_scoped_vector_index():
+    client = MemorySearchClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.memory_search("active task")
+
+    assert result["hits"][0]["id"] == "TASK-demo"
+    call = vector_search_call(client)
+    assert "CALL vector_search.search($index, $limit, queryVector)" in call["query"]
+    assert (
+        call["parameters"]["index"]
+        == "memory_chunk_embedding_v2_p_demo_2a97516c354b"
+    )
 
 
 def test_code_text_search_returns_compact_hits():
@@ -891,8 +1092,8 @@ def test_code_flow_context_bundles_anchors_files_and_edges():
         "endLine",
         "score",
     ]
-    assert result["lexicalAnchors"]["rows"][0][2] == "run"
-    assert result["files"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
+    assert result["lexicalAnchors"] == []
+    assert result["files"]["rows"][0][0] == "src/main/java/demo/Writer.java"
     assert result["flowEdges"]["rows"] == [
         [
             "src/main/java/demo/Orchestrator.java",
@@ -905,10 +1106,14 @@ def test_code_flow_context_bundles_anchors_files_and_edges():
             10,
         ]
     ]
-    assert " AS caller," not in client.calls[-1]["query"]
-    assert " AS callee," not in client.calls[-1]["query"]
     assert "lexicalTerms" not in result["meta"]
-    edge_call = client.calls[-1]
+    edge_call = next(
+        call
+        for call in client.calls
+        if "-[:CALLS]->" in call["query"] and "callerFile.path IN $paths" in call["query"]
+    )
+    assert " AS caller," not in edge_call["query"]
+    assert " AS callee," not in edge_call["query"]
     assert "(callerFile.path IN $paths OR calleeFile.path IN $paths)" in edge_call["query"]
     assert edge_call["parameters"]["include_tests"] is False
     assert edge_call["parameters"]["limit"] == 2
@@ -926,8 +1131,8 @@ def test_code_flow_context_promotes_non_selected_edge_endpoint_files():
         output_format="table_json",
     )
 
-    assert result["files"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
-    assert result["relatedFiles"]["rows"][0][0] == "src/main/java/demo/Writer.java"
+    assert result["files"]["rows"][0][0] == "src/main/java/demo/Writer.java"
+    assert result["relatedFiles"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
     assert "detail" not in result["meta"]
 
 
@@ -1036,13 +1241,27 @@ def test_registered_code_tool_defaults_are_discovery_sized():
     assert quality_defaults["include_tests"]["default"] is False
 
 
+def test_registered_tools_return_compact_json_text():
+    mcp = create_server(MemgraphConfig(default_project="demo"), client=FakeClient())
+    tool = mcp._tool_manager._tools["code_quality_stats"]
+
+    content = asyncio.run(tool.run({"limit": 3}, convert_result=True))
+
+    assert len(content) == 1
+    text = content[0].text
+    assert "\n" not in text
+    parsed = json.loads(text)
+    assert parsed["inventory"] == {"cols": ["ok"], "rows": [[True]]}
+    assert parsed["methodLengths"] == {"ok": True}
+
+
 def test_code_callers_are_compact_and_low_limit_by_default():
     client = CallGraphClient()
     tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
 
     result = tools.code_callers("demo.Bar.b")
 
-    assert client.calls[0]["parameters"]["limit"] == 10
+    assert client.calls[0]["parameters"]["limit"] == 11
     assert result["callers"] == [
         {
             "owner": "Foo",
@@ -1054,6 +1273,17 @@ def test_code_callers_are_compact_and_low_limit_by_default():
             "calleeName": "b",
         }
     ]
+    assert "totalCount" not in result["meta"]
+    assert "hasMore" not in result["meta"]
+
+
+def test_code_callers_can_request_exact_count():
+    client = CallGraphClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_callers("demo.Bar.b", include_count=True)
+
+    assert client.calls[0]["parameters"]["limit"] == 10
     assert result["meta"]["totalCount"] == 100
     assert result["meta"]["hasMore"] is True
 
@@ -1093,7 +1323,7 @@ def test_code_callees_can_return_legacy_shape():
 
     result = tools.code_callees("demo.Foo", compact=False, limit=5)
 
-    assert client.calls[0]["parameters"]["limit"] == 5
+    assert client.calls[0]["parameters"]["limit"] == 6
     assert "callerSignature" in result["callees"][0]
     assert "calleePath" in result["callees"][0]
 
@@ -1167,8 +1397,8 @@ def test_code_method_context_bundles_methods_callers_and_callees():
         "endLine",
     ]
     assert "hasMore" not in result["meta"]["methods"]
-    assert result["meta"]["callers"]["hasMore"] is True
-    assert result["meta"]["callees"]["hasMore"] is True
+    assert "hasMore" not in result["meta"]["callers"]
+    assert "hasMore" not in result["meta"]["callees"]
     assert "format" not in result["meta"]
 
 

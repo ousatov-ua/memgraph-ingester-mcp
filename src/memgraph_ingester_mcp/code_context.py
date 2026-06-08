@@ -67,17 +67,67 @@ class CodeContextMixin:
             MATCH (file:File {project: $project})
             WHERE any(fragment IN $fragments WHERE file.path CONTAINS fragment)
               AND ($include_tests OR NOT file.path STARTS WITH 'src/test/')
-            OPTIONAL MATCH (file)-[:DEFINES]->(definition {project: $project})
-            WITH file, count(DISTINCT definition) AS definitionCount
-            OPTIONAL MATCH (chunk:CodeChunk {project: $project})
-            WHERE chunk.path = file.path
-            WITH file, definitionCount, count(DISTINCT chunk) AS chunkCount
-            RETURN file.path AS path,
-                   file.language AS language,
-                   definitionCount,
-                   chunkCount
+            WITH file
             ORDER BY file.path
             LIMIT $limit
+            CALL {
+              WITH file
+              OPTIONAL MATCH (file)-[:DEFINES]->(node)
+              WHERE node IS NULL
+                 OR (node.project = $project
+                     AND (node:Class OR node:Interface OR node:Annotation))
+              RETURN collect(DISTINCT CASE WHEN node IS NULL THEN null ELSE {
+                label: labels(node)[0],
+                name: node.name,
+                fqn: node.fqn,
+                kind: node.kind,
+                startLine: node.startLine,
+                endLine: node.endLine
+              } END) AS types
+            }
+            CALL {
+              WITH file
+              OPTIONAL MATCH (file)-[:DEFINES]->(method)
+              WHERE method IS NULL OR (method.project = $project AND method:Method)
+              RETURN collect(DISTINCT CASE WHEN method IS NULL THEN null ELSE {
+                owner: method.ownerDisplayName,
+                name: method.name,
+                startLine: method.startLine,
+                endLine: method.endLine
+              } END) AS methods
+            }
+            CALL {
+              WITH file
+              OPTIONAL MATCH (file)-[:DEFINES]->(field)
+              WHERE field IS NULL OR (field.project = $project AND field:Field)
+              RETURN collect(DISTINCT CASE WHEN field IS NULL THEN null ELSE {
+                owner: coalesce(field.ownerDisplayName, field.ownerFqn),
+                name: field.name,
+                startLine: field.startLine,
+                endLine: field.endLine
+              } END) AS fields
+            }
+            CALL {
+              WITH file
+              OPTIONAL MATCH (chunk:CodeChunk {project: $project})
+              WHERE chunk.path = file.path
+              WITH coalesce(chunk.ragRole, chunk.sourceLabel, 'unknown') AS ragRole,
+                   count(chunk) AS count
+              WITH collect(CASE WHEN count = 0 THEN null ELSE {
+                     ragRole: ragRole,
+                     count: count
+                   } END) AS chunkRoles,
+                   sum(count) AS chunkCount
+              RETURN chunkRoles, chunkCount
+            }
+            RETURN file.path AS path,
+                   file.language AS language,
+                   size(types) + size(methods) + size(fields) AS definitionCount,
+                   chunkCount,
+                   chunkRoles,
+                   types,
+                   methods,
+                   fields
             """,
             {
                 "project": project_name,
@@ -90,8 +140,7 @@ class CodeContextMixin:
             file_rows,
             key=lambda row: _fragment_rank(row.get("path"), fragments),
         )
-        paths = [row["path"] for row in file_rows if row.get("path")]
-        if not paths:
+        if not file_rows:
             return self._finalize_response(
                 services._with_result_meta(
                     {
@@ -104,82 +153,45 @@ class CodeContextMixin:
                 output_format,
             )
 
-        type_rows = self.client.run(
-            """
-            MATCH (file:File {project: $project})-[:DEFINES]->(node {project: $project})
-            WHERE file.path IN $paths AND (node:Class OR node:Interface OR node:Annotation)
-            RETURN file.path AS path,
-                   labels(node)[0] AS label,
-                   node.name AS name,
-                   node.fqn AS fqn,
-                   node.kind AS kind,
-                   node.startLine AS startLine,
-                   node.endLine AS endLine
-            ORDER BY file.path, node.startLine, node.fqn
-            """,
-            {"project": project_name, "paths": paths},
-        )
-        method_rows = self.client.run(
-            """
-            MATCH (file:File {project: $project})-[:DEFINES]->(method:Method {project: $project})
-            WHERE file.path IN $paths
-            RETURN file.path AS path,
-                   method.ownerDisplayName AS owner,
-                   method.name AS name,
-                   method.startLine AS startLine,
-                   method.endLine AS endLine
-            ORDER BY file.path, method.startLine, method.name
-            """,
-            {"project": project_name, "paths": paths},
-        )
-        field_rows = self.client.run(
-            """
-            MATCH (file:File {project: $project})-[:DEFINES]->(field:Field {project: $project})
-            WHERE file.path IN $paths
-            RETURN file.path AS path,
-                   coalesce(field.ownerDisplayName, field.ownerFqn) AS owner,
-                   field.name AS name,
-                   field.startLine AS startLine,
-                   field.endLine AS endLine
-            ORDER BY file.path, field.startLine, field.name
-            """,
-            {"project": project_name, "paths": paths},
-        )
-        role_rows = self.client.run(
-            """
-            MATCH (chunk:CodeChunk {project: $project})
-            WHERE chunk.path IN $paths
-            WITH chunk.path AS path,
-                 coalesce(chunk.ragRole, chunk.sourceLabel, 'unknown') AS ragRole,
-                 count(*) AS count
-            RETURN path, ragRole, count
-            ORDER BY path, ragRole
-            """,
-            {"project": project_name, "paths": paths},
-        )
+        def bounded_items(
+            value: Any,
+            *,
+            role_rows: bool = False,
+        ) -> list[dict[str, Any]]:
+            if not isinstance(value, Sequence) or isinstance(value, str):
+                return []
+            rows = [dict(item) for item in value if isinstance(item, Mapping)]
+            if role_rows:
+                rows = [row for row in rows if row.get("count")]
+                rows.sort(key=lambda row: (-(row.get("count") or 0), row.get("ragRole") or ""))
+            else:
+                rows.sort(key=lambda row: (row.get("startLine") or 0, row.get("name") or ""))
+            return rows[:bounded_symbol_limit]
 
-        for row in method_rows:
-            row.pop("signature", None)
-        for row in field_rows:
-            row.pop("fqn", None)
-        types_by_path = _group_limited(type_rows, limit=bounded_symbol_limit)
-        methods_by_path = _group_limited(method_rows, limit=bounded_symbol_limit)
-        fields_by_path = _group_limited(field_rows, limit=bounded_symbol_limit)
-        roles_by_path = _group_limited(role_rows, limit=bounded_symbol_limit)
+        def item_count(value: Any) -> int:
+            if not isinstance(value, Sequence) or isinstance(value, str):
+                return 0
+            return sum(1 for item in value if isinstance(item, Mapping))
 
         files = []
         for row in file_rows:
-            path = row.get("path")
+            types = bounded_items(row.get("types"))
+            methods = bounded_items(row.get("methods"))
+            fields = bounded_items(row.get("fields"))
             files.append(
                 {
-                    "path": path,
+                    "path": row.get("path"),
                     "language": row.get("language"),
-                    "definitionCount": row.get("definitionCount"),
+                    "definitionCount": (
+                        item_count(row.get("types"))
+                        + item_count(row.get("methods"))
+                        + item_count(row.get("fields"))
+                    ),
                     "chunkCount": row.get("chunkCount"),
-                    "chunkRoles": roles_by_path.get(path, []),
-                    "types": types_by_path.get(path, []),
-                    "methods": methods_by_path.get(path, []),
-                    "fields": fields_by_path.get(path, []),
+                    "chunkRoles": bounded_items(row.get("chunkRoles"), role_rows=True),
+                    "types": types,
+                    "methods": methods,
+                    "fields": fields,
                 }
             )
 
@@ -234,8 +246,23 @@ class CodeContextMixin:
         )
         semantic_rows = list(semantic.get("hits", []))
 
+        path_scores: dict[str, float] = {}
+        for index, row in enumerate(semantic_rows):
+            path = row.get("path")
+            if path:
+                score = float(row.get("score") or 0.0)
+                path_scores[path] = (
+                    path_scores.get(path, 0.0)
+                    + (score * 50.0)
+                    + ((bounded_anchor_limit - index) * 2.0)
+                )
+
         lexical_rows: list[dict[str, Any]] = []
-        lexical_terms = services._lexical_query_terms(query, min_length=4)[:16]
+        lexical_terms = (
+            services._lexical_query_terms(query, min_length=4)[:16]
+            if len(path_scores) < bounded_file_limit
+            else []
+        )
         if lexical_terms:
             lexical = self.code_text_search(
                 project=project_name,
@@ -247,16 +274,6 @@ class CodeContextMixin:
             )
             lexical_rows = list(lexical.get("hits", []))
 
-        path_scores: dict[str, float] = {}
-        for index, row in enumerate(semantic_rows):
-            path = row.get("path")
-            if path:
-                score = float(row.get("score") or 0.0)
-                path_scores[path] = (
-                    path_scores.get(path, 0.0)
-                    + (score * 50.0)
-                    + ((bounded_anchor_limit - index) * 2.0)
-                )
         for index, row in enumerate(lexical_rows):
             path = row.get("path")
             if path:
@@ -273,20 +290,8 @@ class CodeContextMixin:
                 :bounded_file_limit
             ]
         ]
-        file_context = (
-            self.code_file_context(
-                selected_paths,
-                project=project_name,
-                limit_files=bounded_file_limit,
-                symbol_limit=flow_symbol_limit,
-                include_tests=include_tests,
-                output_format="json",
-            )
-            if selected_paths
-            else {"files": []}
-        )
-        files = file_context["files"]
 
+        files = []
         flow_edges = []
         related_files = []
         related_paths: list[str] = []
@@ -347,17 +352,23 @@ class CodeContextMixin:
             ):
                 add_related_candidate(path)
             related_paths = related_candidates[:2]
-            if related_paths:
-                outlined_related_paths = related_paths[:related_file_limit]
-                related_context = self.code_file_context(
-                    outlined_related_paths,
-                    project=project_name,
-                    limit_files=len(outlined_related_paths),
-                    symbol_limit=flow_symbol_limit,
-                    include_tests=include_tests,
-                    output_format="json",
-                )
-                related_files = related_context["files"]
+
+        outlined_related_paths = related_paths[:related_file_limit]
+        outline_paths = [*selected_paths, *outlined_related_paths]
+        if outline_paths:
+            file_context = self.code_file_context(
+                outline_paths,
+                project=project_name,
+                limit_files=len(outline_paths),
+                symbol_limit=flow_symbol_limit,
+                include_tests=include_tests,
+                output_format="json",
+            )
+            all_files = file_context["files"]
+            selected_path_set = set(selected_paths)
+            related_path_set = set(outlined_related_paths)
+            files = [row for row in all_files if row.get("path") in selected_path_set]
+            related_files = [row for row in all_files if row.get("path") in related_path_set]
 
         rows_for_meta = semantic_rows + lexical_rows + flow_edges + related_files
         return self._finalize_response(
