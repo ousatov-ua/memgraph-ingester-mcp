@@ -210,6 +210,7 @@ def create_server(
         member_limit: int = MEMBER_LIMIT,
         member_summary: bool = False,
         limit: int = LOOKUP_LIMIT,
+        include_count: bool = False,
         compact: bool = True,
         format: str = "table_json",
     ) -> dict[str, Any]:
@@ -224,6 +225,7 @@ def create_server(
             member_limit=member_limit,
             member_summary=member_summary,
             limit=limit,
+            include_count=include_count,
             compact=compact,
             output_format=format,
         )
@@ -236,6 +238,7 @@ def create_server(
         limit: int = LOOKUP_LIMIT,
         include_tests: bool = False,
         compact: bool = True,
+        include_count: bool = False,
         format: str = "table_json",
     ) -> dict[str, Any]:
         """Find methods by signature fragment and return exact source ranges."""
@@ -247,6 +250,7 @@ def create_server(
             limit=limit,
             include_tests=include_tests,
             compact=compact,
+            include_count=include_count,
             output_format=format,
         )
 
@@ -258,6 +262,7 @@ def create_server(
         limit: int = LOOKUP_LIMIT,
         include_tests: bool = False,
         compact: bool = True,
+        include_count: bool = False,
         format: str = "table_json",
     ) -> dict[str, Any]:
         """Find fields by FQN/name fragment and return source-linked rows."""
@@ -269,6 +274,7 @@ def create_server(
             limit=limit,
             include_tests=include_tests,
             compact=compact,
+            include_count=include_count,
             output_format=format,
         )
 
@@ -280,6 +286,7 @@ def create_server(
         limit: int = LOOKUP_LIMIT,
         include_tests: bool = False,
         compact: bool = True,
+        include_count: bool = False,
         format: str = "table_json",
     ) -> dict[str, Any]:
         """Find indexed files by path fragment with definition and chunk counts."""
@@ -291,6 +298,7 @@ def create_server(
             limit=limit,
             include_tests=include_tests,
             compact=compact,
+            include_count=include_count,
             output_format=format,
         )
 
@@ -330,6 +338,7 @@ def create_server(
         limit: int = CALL_GRAPH_LIMIT,
         include_tests: bool = False,
         compact: bool = True,
+        include_count: bool = False,
         format: str = "table_json",
     ) -> dict[str, Any]:
         """List methods that call matching callee signatures."""
@@ -341,6 +350,7 @@ def create_server(
             limit=limit,
             include_tests=include_tests,
             compact=compact,
+            include_count=include_count,
             output_format=format,
         )
 
@@ -374,6 +384,7 @@ def create_server(
         limit: int = CALL_GRAPH_LIMIT,
         include_tests: bool = False,
         compact: bool = True,
+        include_count: bool = False,
         format: str = "table_json",
     ) -> dict[str, Any]:
         """List callees invoked by matching caller signatures."""
@@ -385,6 +396,7 @@ def create_server(
             limit=limit,
             include_tests=include_tests,
             compact=compact,
+            include_count=include_count,
             output_format=format,
         )
 

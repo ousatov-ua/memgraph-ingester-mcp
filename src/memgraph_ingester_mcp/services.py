@@ -479,6 +479,23 @@ def _with_result_meta(
     return response
 
 
+def _overfetch_limit(limit_value: int, include_count: bool) -> int:
+    return limit_value if include_count else limit_value + 1
+
+
+def _trim_overfetch(
+    rows: list[dict[str, Any]],
+    *,
+    skip: int,
+    limit: int,
+    include_count: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    if include_count or len(rows) <= limit:
+        return rows, None
+    trimmed = rows[:limit]
+    return trimmed, {"hasMore": True, "nextSkip": skip + len(trimmed)}
+
+
 def _normalize_sections(
     sections: Sequence[str] | str | None,
     *,
@@ -749,32 +766,43 @@ class MemgraphIngesterTools(CodeContextMixin):
         role_filter = _normalize_string_list(rag_roles)
         if not role_filter and not include_secondary:
             role_filter = list(DEFAULT_RAG_ROLES)
-        fetch_multiplier = 6 if role_filter else 3
+        kind_filter = frozenset(_normalize_string_list(kinds))
+        path_prefix_filter = _normalize_string_list(path_prefixes)
+        path_contains_filter = (path_contains or "").strip()
+        owner_filter = (owner_fragment or "").strip()
+        filter_active = bool(
+            kind_filter
+            or path_prefix_filter
+            or path_contains_filter
+            or owner_filter
+            or min_score > 0
+        )
+        fetch_multiplier = 10 if filter_active else (6 if role_filter else 3)
         fetch_limit = (
-            min(bounded_limit * fetch_multiplier, 150) if dedupe_by_source else bounded_limit
+            min(bounded_limit * fetch_multiplier, 250) if dedupe_by_source else bounded_limit
         )
         role_projection = "effectiveRole AS ragRole," if include_keys else ""
         return_projection = (
             f"""
-                   coalesce(chunk.sourceLabel, labels(source)[0]) AS kind,
-                   chunk.sourceId AS sourceId,
-                   coalesce(source.ownerDisplayName, source.ownerFqn, chunk.ownerFqn) AS owner,
-                   coalesce(source.name, chunk.signature, chunk.sourceId) AS name,
-                   chunk.path AS path,
+                   kind,
+                   sourceId,
+                   owner,
+                   name,
+                   path,
                    {role_projection}
-                   source.startLine AS startLine, source.endLine AS endLine,
+                   startLine, endLine,
                    round(similarity * 10000) / 10000 AS score,
                    chunk.text AS text
             """
             if include_text
             else f"""
-                   coalesce(chunk.sourceLabel, labels(source)[0]) AS kind,
-                   chunk.sourceId AS sourceId,
-                   coalesce(source.ownerDisplayName, source.ownerFqn, chunk.ownerFqn) AS owner,
-                   coalesce(source.name, chunk.signature, chunk.sourceId) AS name,
-                   chunk.path AS path,
+                   kind,
+                   sourceId,
+                   owner,
+                   name,
+                   path,
                    {role_projection}
-                   source.startLine AS startLine, source.endLine AS endLine,
+                   startLine, endLine,
                    round(similarity * 10000) / 10000 AS score
             """
         )
@@ -800,6 +828,20 @@ class MemgraphIngesterTools(CodeContextMixin):
                    ELSE coalesce(chunk.ragRole, 'primary')
                  END AS effectiveRole
             WHERE size($rag_roles) = 0 OR effectiveRole IN $rag_roles
+            WITH chunk, source, similarity, effectiveRole,
+                 coalesce(chunk.sourceLabel, labels(source)[0]) AS kind,
+                 chunk.sourceId AS sourceId,
+                 coalesce(source.ownerDisplayName, source.ownerFqn, chunk.ownerFqn) AS owner,
+                 coalesce(source.name, chunk.signature, chunk.sourceId) AS name,
+                 chunk.path AS path,
+                 source.startLine AS startLine,
+                 source.endLine AS endLine
+            WHERE (size($kinds) = 0 OR kind IN $kinds)
+              AND (size($path_prefixes) = 0
+                   OR any(prefix IN $path_prefixes WHERE path STARTS WITH prefix))
+              AND ($path_contains = '' OR path CONTAINS $path_contains)
+              AND ($owner_fragment = '' OR coalesce(owner, '') CONTAINS $owner_fragment)
+              AND ($min_score <= 0 OR similarity >= $min_score)
             RETURN __RETURN_PROJECTION__
             ORDER BY similarity DESC
             """.replace("__RETURN_PROJECTION__", return_projection.strip())
@@ -811,12 +853,13 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "limit": fetch_limit,
                 "include_tests": include_tests,
                 "rag_roles": role_filter,
+                "kinds": list(kind_filter),
+                "path_prefixes": path_prefix_filter,
+                "path_contains": path_contains_filter,
+                "owner_fragment": owner_filter,
+                "min_score": min_score,
             },
         )
-        kind_filter = frozenset(_normalize_string_list(kinds))
-        path_prefix_filter = _normalize_string_list(path_prefixes)
-        path_contains_filter = (path_contains or "").strip()
-        owner_filter = (owner_fragment or "").strip()
         filtered_rows: list[dict[str, Any]] = []
         for row in raw_rows:
             if kind_filter and row.get("kind") not in kind_filter:
@@ -1049,6 +1092,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         member_limit: int = MEMBER_LIMIT,
         member_summary: bool = False,
         limit: int = LOOKUP_LIMIT,
+        include_count: bool = False,
         compact: bool = True,
         output_format: str = "json",
     ) -> dict[str, Any]:
@@ -1058,23 +1102,6 @@ class MemgraphIngesterTools(CodeContextMixin):
         bounded_limit = _bounded_limit(limit, default=LOOKUP_LIMIT, maximum=100)
         bounded_member_limit = _bounded_limit(member_limit, default=MEMBER_LIMIT, maximum=200)
         predicate = "t.fqn = $fqn" if fqn else "t.name = $type_name"
-        count_rows = self.client.run(
-            f"""
-            MATCH (t {{project: $project}})
-            WHERE (t:Class OR t:Interface OR t:Annotation) AND {predicate}
-            OPTIONAL MATCH (file:File {{project: $project}})-[:DEFINES]->(t)
-            WITH t, file
-            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-            RETURN count(DISTINCT t) AS count
-            """,
-            {
-                "project": project_name,
-                "type_name": type_name,
-                "fqn": fqn,
-                "include_tests": include_tests,
-            },
-        )
-        total_count = count_rows[0].get("count", 0) if count_rows else 0
         member_count_cypher = (
             """
             OPTIONAL MATCH (t)-[:DECLARES]->(m_cnt:Method {project: $project})
@@ -1115,10 +1142,35 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "project": project_name,
                 "type_name": type_name,
                 "fqn": fqn,
-                "limit": bounded_limit,
+                "limit": _overfetch_limit(bounded_limit, include_count),
                 "include_tests": include_tests,
             },
         )
+        types, page_extra = _trim_overfetch(
+            types,
+            skip=0,
+            limit=bounded_limit,
+            include_count=include_count,
+        )
+        total_count = None
+        if include_count:
+            count_rows = self.client.run(
+                f"""
+                MATCH (t {{project: $project}})
+                WHERE (t:Class OR t:Interface OR t:Annotation) AND {predicate}
+                OPTIONAL MATCH (file:File {{project: $project}})-[:DEFINES]->(t)
+                WITH t, file
+                WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
+                RETURN count(DISTINCT t) AS count
+                """,
+                {
+                    "project": project_name,
+                    "type_name": type_name,
+                    "fqn": fqn,
+                    "include_tests": include_tests,
+                },
+            )
+            total_count = count_rows[0].get("count", 0) if count_rows else len(types)
         if member_summary and not include_members:
             for item in types:
                 item["memberCounts"] = {
@@ -1178,6 +1230,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 types,
                 limit=bounded_limit,
                 total_count=total_count,
+                extra=page_extra,
             ),
             output_format,
         )
@@ -1190,9 +1243,12 @@ class MemgraphIngesterTools(CodeContextMixin):
         limit: int = LOOKUP_LIMIT,
         include_tests: bool = False,
         compact: bool = True,
+        include_count: bool = False,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
+        skip_value = _bounded_skip(skip)
+        limit_value = _bounded_limit(limit, default=LOOKUP_LIMIT, maximum=200)
         return_projection = (
             """
                    method.name AS name, method.ownerDisplayName AS ownerDisplayName,
@@ -1226,10 +1282,16 @@ class MemgraphIngesterTools(CodeContextMixin):
             {
                 "project": project_name,
                 "fragment": signature_fragment,
-                "skip": _bounded_skip(skip),
-                "limit": _bounded_limit(limit, default=LOOKUP_LIMIT, maximum=200),
+                "skip": skip_value,
+                "limit": _overfetch_limit(limit_value, include_count),
                 "include_tests": include_tests,
             },
+        )
+        rows, page_extra = _trim_overfetch(
+            rows,
+            skip=skip_value,
+            limit=limit_value,
+            include_count=include_count,
         )
         if compact:
             rows = [
@@ -1242,24 +1304,24 @@ class MemgraphIngesterTools(CodeContextMixin):
                 }
                 for row in rows
             ]
-        count_rows = self.client.run(
-            """
-            MATCH (method:Method {project: $project})
-            WHERE method.signature CONTAINS $fragment
-            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
-            WITH method, file
-            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-            RETURN count(DISTINCT method) AS count
-            """,
-            {
-                "project": project_name,
-                "fragment": signature_fragment,
-                "include_tests": include_tests,
-            },
-        )
-        total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
-        skip_value = _bounded_skip(skip)
-        limit_value = _bounded_limit(limit, default=LOOKUP_LIMIT, maximum=200)
+        total_count = None
+        if include_count:
+            count_rows = self.client.run(
+                """
+                MATCH (method:Method {project: $project})
+                WHERE method.signature CONTAINS $fragment
+                OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
+                WITH method, file
+                WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
+                RETURN count(DISTINCT method) AS count
+                """,
+                {
+                    "project": project_name,
+                    "fragment": signature_fragment,
+                    "include_tests": include_tests,
+                },
+            )
+            total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
         return self._finalize_response(
             _with_result_meta(
                 {"project": project_name, "methods": rows},
@@ -1267,6 +1329,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 skip=skip_value,
                 limit=limit_value,
                 total_count=total_count,
+                extra=page_extra,
             ),
             output_format,
         )
@@ -1279,6 +1342,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         limit: int = LOOKUP_LIMIT,
         include_tests: bool = False,
         compact: bool = True,
+        include_count: bool = False,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
@@ -1320,9 +1384,15 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "project": project_name,
                 "fragment": field_fragment,
                 "skip": skip_value,
-                "limit": limit_value,
+                "limit": _overfetch_limit(limit_value, include_count),
                 "include_tests": include_tests,
             },
+        )
+        rows, page_extra = _trim_overfetch(
+            rows,
+            skip=skip_value,
+            limit=limit_value,
+            include_count=include_count,
         )
         if compact:
             rows = [
@@ -1336,22 +1406,24 @@ class MemgraphIngesterTools(CodeContextMixin):
                 }
                 for row in rows
             ]
-        count_rows = self.client.run(
-            """
-            MATCH (field:Field {project: $project})
-            WHERE field.fqn CONTAINS $fragment OR field.name = $fragment
-            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(field)
-            WITH field, file
-            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-            RETURN count(DISTINCT field) AS count
-            """,
-            {
-                "project": project_name,
-                "fragment": field_fragment,
-                "include_tests": include_tests,
-            },
-        )
-        total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
+        total_count = None
+        if include_count:
+            count_rows = self.client.run(
+                """
+                MATCH (field:Field {project: $project})
+                WHERE field.fqn CONTAINS $fragment OR field.name = $fragment
+                OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(field)
+                WITH field, file
+                WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
+                RETURN count(DISTINCT field) AS count
+                """,
+                {
+                    "project": project_name,
+                    "fragment": field_fragment,
+                    "include_tests": include_tests,
+                },
+            )
+            total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
         return self._finalize_response(
             _with_result_meta(
                 {"project": project_name, "fields": rows},
@@ -1359,6 +1431,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 skip=skip_value,
                 limit=limit_value,
                 total_count=total_count,
+                extra=page_extra,
             ),
             output_format,
         )
@@ -1371,6 +1444,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         limit: int = LOOKUP_LIMIT,
         include_tests: bool = False,
         compact: bool = True,
+        include_count: bool = False,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
@@ -1408,24 +1482,32 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "project": project_name,
                 "fragment": path_fragment,
                 "skip": skip_value,
-                "limit": limit_value,
+                "limit": _overfetch_limit(limit_value, include_count),
                 "include_tests": include_tests,
             },
         )
-        count_rows = self.client.run(
-            """
-            MATCH (file:File {project: $project})
-            WHERE file.path CONTAINS $fragment
-              AND ($include_tests OR NOT file.path STARTS WITH 'src/test/')
-            RETURN count(DISTINCT file) AS count
-            """,
-            {
-                "project": project_name,
-                "fragment": path_fragment,
-                "include_tests": include_tests,
-            },
+        rows, page_extra = _trim_overfetch(
+            rows,
+            skip=skip_value,
+            limit=limit_value,
+            include_count=include_count,
         )
-        total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
+        total_count = None
+        if include_count:
+            count_rows = self.client.run(
+                """
+                MATCH (file:File {project: $project})
+                WHERE file.path CONTAINS $fragment
+                  AND ($include_tests OR NOT file.path STARTS WITH 'src/test/')
+                RETURN count(DISTINCT file) AS count
+                """,
+                {
+                    "project": project_name,
+                    "fragment": path_fragment,
+                    "include_tests": include_tests,
+                },
+            )
+            total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
         return self._finalize_response(
             _with_result_meta(
                 {"project": project_name, "files": rows},
@@ -1433,6 +1515,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 skip=skip_value,
                 limit=limit_value,
                 total_count=total_count,
+                extra=page_extra,
             ),
             output_format,
         )
@@ -1719,6 +1802,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         limit: int = CALL_GRAPH_LIMIT,
         include_tests: bool = False,
         compact: bool = True,
+        include_count: bool = False,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
@@ -1751,29 +1835,38 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "project": project_name,
                 "fragment": callee_fragment,
                 "skip": skip_value,
-                "limit": limit_value,
+                "limit": _overfetch_limit(limit_value, include_count),
                 "include_tests": include_tests,
             },
         )
-        count_rows = self.client.run(
-            """
-            MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
-            WHERE callee.signature CONTAINS $fragment
-            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
-            OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
-            WITH caller, callee, callerFile, calleeFile
-            WHERE $include_tests
-               OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
-               AND (calleeFile.path IS NULL OR NOT calleeFile.path STARTS WITH 'src/test/'))
-            RETURN count(*) AS count
-            """,
-            {
-                "project": project_name,
-                "fragment": callee_fragment,
-                "include_tests": include_tests,
-            },
+        rows, page_extra = _trim_overfetch(
+            rows,
+            skip=skip_value,
+            limit=limit_value,
+            include_count=include_count,
         )
-        total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
+        total_count = None
+        if include_count:
+            count_rows = self.client.run(
+                """
+                MATCH (caller:Method {project: $project})
+                  -[:CALLS]->(callee:Method {project: $project})
+                WHERE callee.signature CONTAINS $fragment
+                OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
+                OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
+                WITH caller, callee, callerFile, calleeFile
+                WHERE $include_tests
+                   OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
+                   AND (calleeFile.path IS NULL OR NOT calleeFile.path STARTS WITH 'src/test/'))
+                RETURN count(*) AS count
+                """,
+                {
+                    "project": project_name,
+                    "fragment": callee_fragment,
+                    "include_tests": include_tests,
+                },
+            )
+            total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
         if compact:
             rows = [
                 {
@@ -1794,6 +1887,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 skip=skip_value,
                 limit=limit_value,
                 total_count=total_count,
+                extra=page_extra,
             ),
             output_format,
         )
@@ -1859,6 +1953,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         limit: int = CALL_GRAPH_LIMIT,
         include_tests: bool = False,
         compact: bool = True,
+        include_count: bool = False,
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
@@ -1891,29 +1986,38 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "project": project_name,
                 "fragment": caller_fragment,
                 "skip": skip_value,
-                "limit": limit_value,
+                "limit": _overfetch_limit(limit_value, include_count),
                 "include_tests": include_tests,
             },
         )
-        count_rows = self.client.run(
-            """
-            MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
-            WHERE caller.signature CONTAINS $fragment
-            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
-            OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
-            WITH caller, callee, callerFile, calleeFile
-            WHERE $include_tests
-               OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
-               AND (calleeFile.path IS NULL OR NOT calleeFile.path STARTS WITH 'src/test/'))
-            RETURN count(*) AS count
-            """,
-            {
-                "project": project_name,
-                "fragment": caller_fragment,
-                "include_tests": include_tests,
-            },
+        rows, page_extra = _trim_overfetch(
+            rows,
+            skip=skip_value,
+            limit=limit_value,
+            include_count=include_count,
         )
-        total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
+        total_count = None
+        if include_count:
+            count_rows = self.client.run(
+                """
+                MATCH (caller:Method {project: $project})
+                  -[:CALLS]->(callee:Method {project: $project})
+                WHERE caller.signature CONTAINS $fragment
+                OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
+                OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
+                WITH caller, callee, callerFile, calleeFile
+                WHERE $include_tests
+                   OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
+                   AND (calleeFile.path IS NULL OR NOT calleeFile.path STARTS WITH 'src/test/'))
+                RETURN count(*) AS count
+                """,
+                {
+                    "project": project_name,
+                    "fragment": caller_fragment,
+                    "include_tests": include_tests,
+                },
+            )
+            total_count = count_rows[0].get("count", 0) if count_rows else len(rows)
         if compact:
             rows = [
                 {
@@ -1934,6 +2038,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 skip=skip_value,
                 limit=limit_value,
                 total_count=total_count,
+                extra=page_extra,
             ),
             output_format,
         )
@@ -2235,96 +2340,96 @@ class MemgraphIngesterTools(CodeContextMixin):
             "limit": bounded_limit,
             "include_tests": include_tests,
         }
-        inventory = self.client.run(
+        rows = self.client.run(
             """
-            MATCH (n {project: $project})
-            RETURN labels(n) AS labels, count(n) AS count
-            ORDER BY count DESC
-            """,
-            {"project": project_name},
-        )
-        method_lengths = self.client.run(
-            """
-            MATCH (file:File {project: $project})-[:DEFINES]->(method:Method {project: $project})
-            WHERE ($include_tests OR NOT file.path STARTS WITH 'src/test/')
-              AND method.startLine IS NOT NULL AND method.endLine IS NOT NULL
-              AND coalesce(method.isSynthetic, false) = false
-            WITH method.endLine - method.startLine + 1 AS lines
-            RETURN count(lines) AS methods,
-                   round(avg(lines) * 100) / 100 AS avgLines,
-                   max(lines) AS maxLines,
-                   sum(CASE WHEN lines >= 50 THEN 1 ELSE 0 END) AS methods50Plus,
-                   sum(CASE WHEN lines >= 100 THEN 1 ELSE 0 END) AS methods100Plus
+            CALL {
+              MATCH (n {project: $project})
+              WITH labels(n) AS labels, count(n) AS count
+              ORDER BY count DESC
+              RETURN collect({labels: labels, count: count}) AS inventory
+            }
+            CALL {
+              MATCH (file:File {project: $project})
+                -[:DEFINES]->(method:Method {project: $project})
+              WHERE ($include_tests OR NOT file.path STARTS WITH 'src/test/')
+                AND method.startLine IS NOT NULL AND method.endLine IS NOT NULL
+                AND coalesce(method.isSynthetic, false) = false
+              WITH method.endLine - method.startLine + 1 AS lines
+              RETURN {
+                methods: count(lines),
+                avgLines: round(avg(lines) * 100) / 100,
+                maxLines: max(lines),
+                methods50Plus: sum(CASE WHEN lines >= 50 THEN 1 ELSE 0 END),
+                methods100Plus: sum(CASE WHEN lines >= 100 THEN 1 ELSE 0 END)
+              } AS methodLengths
+            }
+            CALL {
+              MATCH (method:Method {project: $project})
+              OPTIONAL MATCH (method)-[call:CALLS]->(:Method {project: $project})
+              WITH method, count(call) AS degree
+              RETURN {
+                methods: count(method),
+                avgOut: round(avg(degree) * 100) / 100,
+                maxOut: max(degree),
+                methodsOut10Plus: sum(CASE WHEN degree >= 10 THEN 1 ELSE 0 END),
+                methodsOut0: sum(CASE WHEN degree = 0 THEN 1 ELSE 0 END)
+              } AS fanOut
+            }
+            CALL {
+              MATCH (method:Method {project: $project})
+              OPTIONAL MATCH (:Method {project: $project})-[call:CALLS]->(method)
+              WITH method, count(call) AS degree
+              RETURN {
+                methods: count(method),
+                avgIn: round(avg(degree) * 100) / 100,
+                maxIn: max(degree),
+                methodsIn10Plus: sum(CASE WHEN degree >= 10 THEN 1 ELSE 0 END),
+                methodsIn0: sum(CASE WHEN degree = 0 THEN 1 ELSE 0 END)
+              } AS fanIn
+            }
+            CALL {
+              MATCH (type {project: $project})
+              WHERE type:Class OR type:Interface OR type:Annotation
+              OPTIONAL MATCH (type)-[:DECLARES]->(method:Method {project: $project})
+              WITH type, count(method) AS methods
+              RETURN {
+                types: count(type),
+                avgMethodsPerType: round(avg(methods) * 100) / 100,
+                maxMethodsPerType: max(methods),
+                types25MethodsPlus: sum(CASE WHEN methods >= 25 THEN 1 ELSE 0 END),
+                types50MethodsPlus: sum(CASE WHEN methods >= 50 THEN 1 ELSE 0 END)
+              } AS typeSizes
+            }
+            CALL {
+              MATCH (chunk:CodeChunk {project: $project})
+              WITH chunk.sourceLabel AS sourceLabel, count(chunk) AS chunks
+              ORDER BY chunks DESC, sourceLabel
+              RETURN collect({sourceLabel: sourceLabel, chunks: chunks}) AS chunksByLabel
+            }
+            CALL {
+              MATCH (file:File {project: $project})
+                -[:DEFINES]->(method:Method {project: $project})
+              WHERE $include_tests OR NOT file.path STARTS WITH 'src/test/'
+              WITH file.path AS path, count(method) AS methods
+              ORDER BY methods DESC, path
+              LIMIT $limit
+              RETURN collect({path: path, methods: methods}) AS filesByMethods
+            }
+            RETURN inventory, methodLengths, fanOut, fanIn, typeSizes,
+                   chunksByLabel, filesByMethods
             """,
             params,
         )
-        fan_out = self.client.run(
-            """
-            MATCH (method:Method {project: $project})
-            OPTIONAL MATCH (method)-[call:CALLS]->(:Method {project: $project})
-            WITH method, count(call) AS degree
-            RETURN count(method) AS methods,
-                   round(avg(degree) * 100) / 100 AS avgOut,
-                   max(degree) AS maxOut,
-                   sum(CASE WHEN degree >= 10 THEN 1 ELSE 0 END) AS methodsOut10Plus,
-                   sum(CASE WHEN degree = 0 THEN 1 ELSE 0 END) AS methodsOut0
-            """,
-            {"project": project_name},
-        )
-        fan_in = self.client.run(
-            """
-            MATCH (method:Method {project: $project})
-            OPTIONAL MATCH (:Method {project: $project})-[call:CALLS]->(method)
-            WITH method, count(call) AS degree
-            RETURN count(method) AS methods,
-                   round(avg(degree) * 100) / 100 AS avgIn,
-                   max(degree) AS maxIn,
-                   sum(CASE WHEN degree >= 10 THEN 1 ELSE 0 END) AS methodsIn10Plus,
-                   sum(CASE WHEN degree = 0 THEN 1 ELSE 0 END) AS methodsIn0
-            """,
-            {"project": project_name},
-        )
-        type_sizes = self.client.run(
-            """
-            MATCH (type {project: $project})
-            WHERE type:Class OR type:Interface OR type:Annotation
-            OPTIONAL MATCH (type)-[:DECLARES]->(method:Method {project: $project})
-            WITH type, count(method) AS methods
-            RETURN count(type) AS types,
-                   round(avg(methods) * 100) / 100 AS avgMethodsPerType,
-                   max(methods) AS maxMethodsPerType,
-                   sum(CASE WHEN methods >= 25 THEN 1 ELSE 0 END) AS types25MethodsPlus,
-                   sum(CASE WHEN methods >= 50 THEN 1 ELSE 0 END) AS types50MethodsPlus
-            """,
-            {"project": project_name},
-        )
-        chunks_by_label = self.client.run(
-            """
-            MATCH (chunk:CodeChunk {project: $project})
-            RETURN chunk.sourceLabel AS sourceLabel, count(chunk) AS chunks
-            ORDER BY chunks DESC, sourceLabel
-            """,
-            {"project": project_name},
-        )
-        files_by_methods = self.client.run(
-            """
-            MATCH (file:File {project: $project})-[:DEFINES]->(method:Method {project: $project})
-            WHERE $include_tests OR NOT file.path STARTS WITH 'src/test/'
-            RETURN file.path AS path, count(method) AS methods
-            ORDER BY methods DESC, path
-            LIMIT $limit
-            """,
-            params,
-        )
+        stats = rows[0] if rows else {}
         response = {
             "project": project_name,
-            "inventory": inventory,
-            "methodLengths": method_lengths[0] if method_lengths else {},
-            "fanOut": fan_out[0] if fan_out else {},
-            "fanIn": fan_in[0] if fan_in else {},
-            "typeSizes": type_sizes[0] if type_sizes else {},
-            "chunksByLabel": chunks_by_label,
-            "filesByMethods": files_by_methods,
+            "inventory": stats.get("inventory", []),
+            "methodLengths": stats.get("methodLengths", {}),
+            "fanOut": stats.get("fanOut", {}),
+            "fanIn": stats.get("fanIn", {}),
+            "typeSizes": stats.get("typeSizes", {}),
+            "chunksByLabel": stats.get("chunksByLabel", []),
+            "filesByMethods": stats.get("filesByMethods", []),
         }
         response["meta"] = {"limit": bounded_limit}
         return self._finalize_response(response, output_format)

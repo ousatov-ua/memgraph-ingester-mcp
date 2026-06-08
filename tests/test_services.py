@@ -94,6 +94,19 @@ class FakeClient:
                 }
             ]
 
+        if "RETURN inventory, methodLengths" in query:
+            return [
+                {
+                    "inventory": [{"ok": True}],
+                    "methodLengths": {"ok": True},
+                    "fanOut": {"ok": True},
+                    "fanIn": {"ok": True},
+                    "typeSizes": {"ok": True},
+                    "chunksByLabel": [{"ok": True}],
+                    "filesByMethods": [{"ok": True}],
+                }
+            ]
+
         if "WHERE method.signature CONTAINS $fragment" in query:
             if "RETURN count(method) AS count" in query:
                 return [{"count": 1}]
@@ -477,6 +490,75 @@ class CodeContextClient:
                     "endLine": 90,
                 }
             ]
+        if "chunkRoles" in query and "MATCH (file:File" in query:
+            rows = [
+                {
+                    "path": "src/main/java/demo/Writer.java",
+                    "language": "java",
+                    "definitionCount": 3,
+                    "chunkCount": 6,
+                    "chunkRoles": [
+                        {"ragRole": "primary", "count": 3},
+                        {"ragRole": "file", "count": 1},
+                    ],
+                    "types": [
+                        {
+                            "label": "Class",
+                            "name": "Writer",
+                            "fqn": "demo.Writer",
+                            "kind": "class",
+                            "startLine": 1,
+                            "endLine": 80,
+                        }
+                    ],
+                    "methods": [
+                        {
+                            "owner": "Writer",
+                            "name": "refresh",
+                            "startLine": 10,
+                            "endLine": 40,
+                        }
+                    ],
+                    "fields": [
+                        {
+                            "owner": "Writer",
+                            "name": "cypher",
+                            "startLine": 7,
+                            "endLine": 7,
+                        }
+                    ],
+                },
+                {
+                    "path": "src/main/java/demo/Orchestrator.java",
+                    "language": "java",
+                    "definitionCount": 2,
+                    "chunkCount": 4,
+                    "chunkRoles": [{"ragRole": "primary", "count": 2}],
+                    "types": [
+                        {
+                            "label": "Class",
+                            "name": "Orchestrator",
+                            "fqn": "demo.Orchestrator",
+                            "kind": "class",
+                            "startLine": 1,
+                            "endLine": 120,
+                        }
+                    ],
+                    "methods": [
+                        {
+                            "owner": "Orchestrator",
+                            "name": "run",
+                            "startLine": 50,
+                            "endLine": 90,
+                        }
+                    ],
+                    "fields": [],
+                },
+            ]
+            fragments = params.get("fragments") or []
+            if not fragments:
+                return rows
+            return [row for row in rows if any(fragment in row["path"] for fragment in fragments)]
         if "definitionCount" in query and "MATCH (file:File" in query:
             rows = [
                 {
@@ -894,8 +976,8 @@ def test_code_flow_context_bundles_anchors_files_and_edges():
         "endLine",
         "score",
     ]
-    assert result["lexicalAnchors"]["rows"][0][2] == "run"
-    assert result["files"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
+    assert result["lexicalAnchors"] == []
+    assert result["files"]["rows"][0][0] == "src/main/java/demo/Writer.java"
     assert result["flowEdges"]["rows"] == [
         [
             "src/main/java/demo/Orchestrator.java",
@@ -908,10 +990,14 @@ def test_code_flow_context_bundles_anchors_files_and_edges():
             10,
         ]
     ]
-    assert " AS caller," not in client.calls[-1]["query"]
-    assert " AS callee," not in client.calls[-1]["query"]
     assert "lexicalTerms" not in result["meta"]
-    edge_call = client.calls[-1]
+    edge_call = next(
+        call
+        for call in client.calls
+        if "-[:CALLS]->" in call["query"] and "callerFile.path IN $paths" in call["query"]
+    )
+    assert " AS caller," not in edge_call["query"]
+    assert " AS callee," not in edge_call["query"]
     assert "(callerFile.path IN $paths OR calleeFile.path IN $paths)" in edge_call["query"]
     assert edge_call["parameters"]["include_tests"] is False
     assert edge_call["parameters"]["limit"] == 2
@@ -929,8 +1015,8 @@ def test_code_flow_context_promotes_non_selected_edge_endpoint_files():
         output_format="table_json",
     )
 
-    assert result["files"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
-    assert result["relatedFiles"]["rows"][0][0] == "src/main/java/demo/Writer.java"
+    assert result["files"]["rows"][0][0] == "src/main/java/demo/Writer.java"
+    assert result["relatedFiles"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
     assert "detail" not in result["meta"]
 
 
@@ -1059,7 +1145,7 @@ def test_code_callers_are_compact_and_low_limit_by_default():
 
     result = tools.code_callers("demo.Bar.b")
 
-    assert client.calls[0]["parameters"]["limit"] == 10
+    assert client.calls[0]["parameters"]["limit"] == 11
     assert result["callers"] == [
         {
             "owner": "Foo",
@@ -1071,6 +1157,17 @@ def test_code_callers_are_compact_and_low_limit_by_default():
             "calleeName": "b",
         }
     ]
+    assert "totalCount" not in result["meta"]
+    assert "hasMore" not in result["meta"]
+
+
+def test_code_callers_can_request_exact_count():
+    client = CallGraphClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_callers("demo.Bar.b", include_count=True)
+
+    assert client.calls[0]["parameters"]["limit"] == 10
     assert result["meta"]["totalCount"] == 100
     assert result["meta"]["hasMore"] is True
 
@@ -1110,7 +1207,7 @@ def test_code_callees_can_return_legacy_shape():
 
     result = tools.code_callees("demo.Foo", compact=False, limit=5)
 
-    assert client.calls[0]["parameters"]["limit"] == 5
+    assert client.calls[0]["parameters"]["limit"] == 6
     assert "callerSignature" in result["callees"][0]
     assert "calleePath" in result["callees"][0]
 
@@ -1184,8 +1281,8 @@ def test_code_method_context_bundles_methods_callers_and_callees():
         "endLine",
     ]
     assert "hasMore" not in result["meta"]["methods"]
-    assert result["meta"]["callers"]["hasMore"] is True
-    assert result["meta"]["callees"]["hasMore"] is True
+    assert "hasMore" not in result["meta"]["callers"]
+    assert "hasMore" not in result["meta"]["callees"]
     assert "format" not in result["meta"]
 
 
