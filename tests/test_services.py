@@ -1,3 +1,6 @@
+import asyncio
+import json
+
 import pytest
 
 from memgraph_ingester_mcp.config import MemgraphConfig
@@ -1034,6 +1037,20 @@ def test_registered_code_tool_defaults_are_discovery_sized():
     assert registered["code_quality_stats"].parameters["properties"]["limit"]["default"] == 5
     quality_defaults = registered["code_quality_stats"].parameters["properties"]
     assert quality_defaults["include_tests"]["default"] is False
+
+
+def test_registered_tools_return_compact_json_text():
+    mcp = create_server(MemgraphConfig(default_project="demo"), client=FakeClient())
+    tool = mcp._tool_manager._tools["code_quality_stats"]
+
+    content = asyncio.run(tool.run({"limit": 3}, convert_result=True))
+
+    assert len(content) == 1
+    text = content[0].text
+    assert "\n" not in text
+    parsed = json.loads(text)
+    assert parsed["inventory"] == {"cols": ["ok"], "rows": [[True]]}
+    assert parsed["methodLengths"] == {"ok": True}
 
 
 def test_code_callers_are_compact_and_low_limit_by_default():

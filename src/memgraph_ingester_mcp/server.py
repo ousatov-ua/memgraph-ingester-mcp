@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
+import json
+from collections.abc import Callable
+from functools import wraps
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -17,6 +21,10 @@ from memgraph_ingester_mcp.services import (
 )
 
 
+def _compact_json_response(response: Any) -> str:
+    return json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+
+
 def create_server(
     config: MemgraphConfig | None = None,
     client: MemgraphClient | None = None,
@@ -27,13 +35,24 @@ def create_server(
     tools = MemgraphIngesterTools(client or MemgraphClient(resolved_config), resolved_config)
     mcp = FastMCP("memgraph-ingester")
 
-    @mcp.tool()
+    def compact_tool(fn: Callable[..., dict[str, Any]]) -> Callable[..., str]:
+        signature = inspect.signature(fn)
+
+        @wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> str:
+            return _compact_json_response(fn(*args, **kwargs))
+
+        wrapper.__signature__ = signature.replace(return_annotation=str)  # type: ignore[attr-defined]
+        mcp.tool(structured_output=False)(wrapper)
+        return wrapper
+
+    @compact_tool
     def server_status(project: str | None = None) -> dict[str, Any]:
         """Summarize graph inventory, memory counts, and vector indexes for a project."""
 
         return tools.server_status(project)
 
-    @mcp.tool()
+    @compact_tool
     def code_orientation(
         project: str | None = None,
         limit: int = 30,
@@ -43,7 +62,7 @@ def create_server(
 
         return tools.code_orientation(project, limit, sections)
 
-    @mcp.tool()
+    @compact_tool
     def code_search(
         query: str,
         project: str | None = None,
@@ -83,7 +102,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_text_search(
         query: str | None = None,
         project: str | None = None,
@@ -117,7 +136,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_discovery_context(
         query: str,
         project: str | None = None,
@@ -137,7 +156,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_file_context(
         path_fragments: list[str] | None = None,
         project: str | None = None,
@@ -157,7 +176,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_flow_context(
         query: str,
         project: str | None = None,
@@ -181,7 +200,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_lookup_type(
         project: str | None = None,
         type_name: str | None = None,
@@ -209,7 +228,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_lookup_methods(
         signature_fragment: str,
         project: str | None = None,
@@ -231,7 +250,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_lookup_field(
         field_fragment: str,
         project: str | None = None,
@@ -253,7 +272,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_lookup_file(
         path_fragment: str,
         project: str | None = None,
@@ -275,7 +294,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_impact(
         signature_fragment: str,
         project: str | None = None,
@@ -303,7 +322,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_callers(
         callee_fragment: str,
         project: str | None = None,
@@ -325,7 +344,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_method_context(
         signature_fragment: str,
         project: str | None = None,
@@ -347,7 +366,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_callees(
         caller_fragment: str,
         project: str | None = None,
@@ -369,7 +388,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_hot_paths(
         project: str | None = None,
         limit: int = DISCOVERY_LIMIT,
@@ -389,7 +408,7 @@ def create_server(
             format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_operation_hot_paths(
         project: str | None = None,
         sink_fragments: list[str] | None = None,
@@ -411,7 +430,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_resource_risk_scan(
         project: str | None = None,
         path_contains: str | None = None,
@@ -431,7 +450,7 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def code_quality_stats(
         project: str | None = None,
         include_tests: bool = False,
@@ -442,13 +461,13 @@ def create_server(
 
         return tools.code_quality_stats(project, include_tests, limit, format)
 
-    @mcp.tool()
+    @compact_tool
     def code_hierarchy(fqn: str, project: str | None = None) -> dict[str, Any]:
         """Return class ancestry, children, interfaces, and interface implementors."""
 
         return tools.code_hierarchy(fqn, project)
 
-    @mcp.tool()
+    @compact_tool
     def code_test_context(
         test_fragment: str,
         project: str | None = None,
@@ -466,37 +485,37 @@ def create_server(
             output_format=format,
         )
 
-    @mcp.tool()
+    @compact_tool
     def memory_orientation(project: str | None = None, compact: bool = False) -> dict[str, Any]:
         """Return rules plus open findings, tasks, questions, and risks."""
 
         return tools.memory_orientation(project, compact)
 
-    @mcp.tool()
+    @compact_tool
     def memory_schema(memory_type: str | None = None) -> dict[str, Any]:
         """Return allowed memory types, fields, controlled values, and CodeRef targets."""
 
         return tools.memory_schema(memory_type)
 
-    @mcp.tool()
+    @compact_tool
     def memory_search(query: str, project: str | None = None, limit: int = 5) -> dict[str, Any]:
         """Search MemoryChunk embeddings and return index-only memory hits."""
 
         return tools.memory_search(query, project, limit)
 
-    @mcp.tool()
+    @compact_tool
     def memory_get(memory_id: str, project: str | None = None) -> dict[str, Any]:
         """Fetch one canonical memory node with resolved CodeRef targets."""
 
         return tools.memory_get(memory_id, project)
 
-    @mcp.tool()
+    @compact_tool
     def delete_memory(memory_id: str, project: str | None = None) -> dict[str, Any]:
         """Delete one Memory node plus its derived chunk and orphan CodeRefs."""
 
         return tools.delete_memory(memory_id, project)
 
-    @mcp.tool()
+    @compact_tool
     def memory_upsert(
         memory_type: str,
         memory_id: str,
@@ -518,7 +537,7 @@ def create_server(
             embed,
         )
 
-    @mcp.tool()
+    @compact_tool
     def memory_update_status(
         memory_type: str,
         memory_id: str,
@@ -538,7 +557,7 @@ def create_server(
             embed,
         )
 
-    @mcp.tool()
+    @compact_tool
     def memory_link_code_ref(
         memory_type: str,
         memory_id: str,
@@ -560,7 +579,7 @@ def create_server(
             embed=embed,
         )
 
-    @mcp.tool()
+    @compact_tool
     def memory_refresh_chunk(
         memory_type: str,
         memory_id: str,
@@ -571,7 +590,7 @@ def create_server(
 
         return tools.memory_refresh_chunk(memory_type, memory_id, project, embed=embed)
 
-    @mcp.tool()
+    @compact_tool
     def memory_refresh_embeddings(
         chunk_ids: list[str],
         project: str | None = None,
@@ -580,7 +599,7 @@ def create_server(
 
         return tools.memory_refresh_embeddings(chunk_ids, project)
 
-    @mcp.tool()
+    @compact_tool
     def raw_read_cypher(
         query: str,
         project: str | None = None,
