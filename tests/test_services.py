@@ -6,7 +6,7 @@ import pytest
 from memgraph_ingester_mcp.config import MemgraphConfig
 from memgraph_ingester_mcp.db import MemgraphError
 from memgraph_ingester_mcp.server import create_server
-from memgraph_ingester_mcp.services import MemgraphIngesterTools
+from memgraph_ingester_mcp.services import MemgraphIngesterTools, _project_vector_index_name
 
 
 class FakeClient:
@@ -127,6 +127,13 @@ def make_tools():
     return MemgraphIngesterTools(FakeClient(), MemgraphConfig(default_project="demo"))
 
 
+def test_project_vector_index_name_matches_ingester_derivation():
+    assert (
+        _project_vector_index_name("code_chunk_embedding_v2", "My Project!")
+        == "code_chunk_embedding_v2_p_my_project_cfad424950cd"
+    )
+
+
 class CodeLookupClient:
     def __init__(self):
         self.calls = []
@@ -194,6 +201,25 @@ class SearchClient:
                 "score": 0.8,
                 "text": "duplicate",
             },
+        ]
+
+
+class MemorySearchClient:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, query, parameters=None, *, write=False):
+        self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
+        return [
+            {
+                "type": ["Task"],
+                "id": "TASK-demo",
+                "title": "Demo",
+                "status": "doing",
+                "sourceLabel": "Task",
+                "sourceId": "TASK-demo",
+                "similarity": 0.88,
+            }
         ]
 
 
@@ -769,6 +795,11 @@ def test_code_search_omits_text_and_dedupes_by_default():
     assert len(result["hits"]) == 1
     assert "text" not in result["hits"][0]
     assert "chunk.text AS text" not in client.calls[0]["query"]
+    assert "CALL vector_search.search($index, $limit, queryVector)" in client.calls[0]["query"]
+    assert (
+        client.calls[0]["parameters"]["index"]
+        == "code_chunk_embedding_v2_p_demo_2a97516c354b"
+    )
     assert client.calls[0]["parameters"]["rag_roles"] == ["primary", "file"]
     assert "hasMore" not in result["meta"]
 
@@ -869,6 +900,20 @@ def test_code_search_can_include_secondary_chunks():
     tools.code_search("hot path", include_secondary=True)
 
     assert client.calls[0]["parameters"]["rag_roles"] == []
+
+
+def test_memory_search_uses_project_scoped_vector_index():
+    client = MemorySearchClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.memory_search("active task")
+
+    assert result["hits"][0]["id"] == "TASK-demo"
+    assert "CALL vector_search.search($index, $limit, queryVector)" in client.calls[0]["query"]
+    assert (
+        client.calls[0]["parameters"]["index"]
+        == "memory_chunk_embedding_v2_p_demo_2a97516c354b"
+    )
 
 
 def test_code_text_search_returns_compact_hits():

@@ -21,6 +21,7 @@ from memgraph_ingester_mcp.schema import (
 TOKEN_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 STRING_RE = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
 CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|[^A-Za-z0-9]+")
+CYPHER_IDENTIFIER_RE = re.compile(r"^[A-Za-z_]\w*$")
 RESOURCE_SCAN_EXTENSIONS = (
     ".cypher",
     ".sql",
@@ -33,6 +34,8 @@ RESOURCE_SCAN_EXTENSIONS = (
     ".xml",
     ".properties",
 )
+PROJECT_TOKEN_SLUG_LIMIT = 48
+PROJECT_TOKEN_HASH_LENGTH = 12
 UNBOUNDED_GRAPH_TRAVERSAL_RE = re.compile(r"\[[^\]]*\*\s*\d*\.\.[^\d\]]*\]")
 ROOT_MATCH_RE = re.compile(r"\b(?:OPTIONAL\s+)?MATCH\s*\([^)]*\{[^}]+}[^)]*\)", re.IGNORECASE)
 SQL_WRITE_WITHOUT_WHERE_RE = re.compile(
@@ -128,6 +131,24 @@ def _bounded_text_limit(limit: int) -> int:
     if limit <= 0:
         return 0
     return min(limit, 2_000)
+
+
+def _project_vector_index_name(base_index_name: str, project: str) -> str:
+    if not CYPHER_IDENTIFIER_RE.fullmatch(base_index_name):
+        raise MemgraphError("Embedding vector index base name must be a Cypher identifier.")
+    normalized = project.strip()
+    if not normalized:
+        raise MemgraphError("Project is required for project-scoped vector index lookup.")
+    return f"{base_index_name}_{_project_index_token(normalized)}"
+
+
+def _project_index_token(project: str) -> str:
+    slug = CAMEL_BOUNDARY_RE.sub("_", project.lower()).strip("_")
+    slug = re.sub(r"_+", "_", slug)
+    slug = "".join(ch for ch in slug if ch.isascii() and (ch.isalnum() or ch == "_"))
+    slug = slug[:PROJECT_TOKEN_SLUG_LIMIT].strip("_") or "project"
+    digest = sha256(project.encode()).hexdigest()[:PROJECT_TOKEN_HASH_LENGTH]
+    return f"p_{slug}_{digest}"
 
 
 def _first(value: Any) -> Any:
@@ -632,6 +653,10 @@ class MemgraphIngesterTools(CodeContextMixin):
 
     def server_status(self, project: str | None = None) -> dict[str, Any]:
         project_name = self.resolve_project(project)
+        vector_index_names = {
+            _project_vector_index_name(self.config.code_embedding_index_name, project_name),
+            _project_vector_index_name(self.config.memory_embedding_index_name, project_name),
+        }
         languages = self.client.run(
             """
             MATCH (c:Code {project: $project})
@@ -664,7 +689,11 @@ class MemgraphIngesterTools(CodeContextMixin):
             """,
             {"project": project_name},
         )
-        indexes = self.client.run("SHOW VECTOR INDEX INFO")
+        indexes = [
+            row
+            for row in self.client.run("SHOW VECTOR INDEX INFO")
+            if row.get("index_name") in vector_index_names
+        ]
         return {
             "project": project_name,
             "languages": languages,
@@ -761,6 +790,10 @@ class MemgraphIngesterTools(CodeContextMixin):
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
+        index_name = _project_vector_index_name(
+            self.config.code_embedding_index_name,
+            project_name,
+        )
         bounded_limit = _bounded_limit(limit, default=DISCOVERY_LIMIT, maximum=25)
         bounded_text_limit = _bounded_text_limit(text_limit)
         role_filter = _normalize_string_list(rag_roles)
@@ -809,7 +842,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         search_query = """
             CALL embeddings.text([$query], {}) YIELD embeddings
             WITH embeddings[0] AS queryVector
-            CALL vector_search.search('code_chunk_embedding_v2', $limit, queryVector)
+            CALL vector_search.search($index, $limit, queryVector)
             YIELD node AS chunk, similarity
             WITH chunk, similarity
             WHERE chunk.project = $project
@@ -848,6 +881,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         raw_rows = self.client.run(
             search_query,
             {
+                "index": index_name,
                 "project": project_name,
                 "query": query,
                 "limit": fetch_limit,
@@ -2716,11 +2750,15 @@ class MemgraphIngesterTools(CodeContextMixin):
         limit: int = 5,
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
+        index_name = _project_vector_index_name(
+            self.config.memory_embedding_index_name,
+            project_name,
+        )
         rows = self.client.run(
             """
             CALL embeddings.text([$query], {}) YIELD embeddings
             WITH embeddings[0] AS queryVector
-            CALL vector_search.search('memory_chunk_embedding_v2', $limit, queryVector)
+            CALL vector_search.search($index, $limit, queryVector)
             YIELD node AS chunk, similarity
             WITH chunk, similarity
             WHERE chunk.project = $project
@@ -2731,6 +2769,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             ORDER BY similarity DESC
             """,
             {
+                "index": index_name,
                 "project": project_name,
                 "query": query,
                 "limit": _bounded_limit(limit, default=5, maximum=20),

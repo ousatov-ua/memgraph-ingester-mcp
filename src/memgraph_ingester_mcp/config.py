@@ -45,6 +45,8 @@ class MemgraphConfig:
     default_project: str | None = None
     query_timeout_seconds: float = 30.0
     read_only: bool = False
+    code_embedding_index_name: str = "code_chunk_embedding_v2"
+    memory_embedding_index_name: str = "memory_chunk_embedding_v2"
     embedding_model_name: str = "default"
     embedding_dimensions: int = 384
     compression_enabled: bool = False
@@ -70,6 +72,14 @@ class MemgraphConfig:
                 cls.query_timeout_seconds,
             ),
             read_only=_bool_env("MEMGRAPH_INGESTER_MCP_READ_ONLY", cls.read_only),
+            code_embedding_index_name=getenv(
+                "MEMGRAPH_INGESTER_MCP_CODE_EMBEDDING_INDEX",
+                cls.code_embedding_index_name,
+            ),
+            memory_embedding_index_name=getenv(
+                "MEMGRAPH_INGESTER_MCP_MEMORY_EMBEDDING_INDEX",
+                cls.memory_embedding_index_name,
+            ),
             embedding_model_name=getenv(
                 "MEMGRAPH_INGESTER_MCP_EMBEDDING_MODEL",
                 cls.embedding_model_name,
