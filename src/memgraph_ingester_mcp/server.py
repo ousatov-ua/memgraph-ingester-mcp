@@ -22,7 +22,7 @@ from memgraph_ingester_mcp.services import (
 
 
 def _compact_json_response(response: Any) -> str:
-    return json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(response, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def create_server(

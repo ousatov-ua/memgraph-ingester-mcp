@@ -5,7 +5,7 @@ import pytest
 
 from memgraph_ingester_mcp.config import MemgraphConfig
 from memgraph_ingester_mcp.db import MemgraphError
-from memgraph_ingester_mcp.server import create_server
+from memgraph_ingester_mcp.server import _compact_json_response, create_server
 from memgraph_ingester_mcp.services import MemgraphIngesterTools, _project_vector_index_name
 
 
@@ -123,6 +123,24 @@ class FakeClient:
         return [{"ok": True}]
 
 
+class StatusClient:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, query, parameters=None, *, write=False):
+        self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
+        if query == "SHOW VECTOR INDEX INFO":
+            return [
+                {"index_name": "code_chunk_embedding_v2"},
+                {"index_name": "memory_chunk_embedding_v2"},
+                {"index_name": "memory_chunk_embedding_v2_p_demo_2a97516c354b"},
+                {"index_name": "unrelated_index"},
+            ]
+        if "RETURN size(languages) AS languageCount" in query:
+            return [{"languageCount": 0, "fileCount": 0, "typeCount": 0, "methodCount": 0}]
+        return []
+
+
 def make_tools():
     return MemgraphIngesterTools(FakeClient(), MemgraphConfig(default_project="demo"))
 
@@ -132,6 +150,22 @@ def test_project_vector_index_name_matches_ingester_derivation():
         _project_vector_index_name("code_chunk_embedding_v2", "My Project!")
         == "code_chunk_embedding_v2_p_my_project_cfad424950cd"
     )
+    assert _project_vector_index_name("idx", "MyProject") == "idx_p_myproject_2399f4e9bd5f"
+
+
+def test_compact_json_response_serializes_database_temporal_values():
+    class TemporalValue:
+        def __str__(self):
+            return "2026-06-08T21:18:39Z"
+
+    assert (
+        _compact_json_response({"createdAt": TemporalValue()})
+        == '{"createdAt":"2026-06-08T21:18:39Z"}'
+    )
+
+
+def vector_search_call(client):
+    return next(call for call in client.calls if "CALL vector_search.search" in call["query"])
 
 
 class CodeLookupClient:
@@ -178,6 +212,8 @@ class SearchClient:
 
     def run(self, query, parameters=None, *, write=False):
         self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
+        if query == "SHOW VECTOR INDEX INFO":
+            return [{"index_name": "code_chunk_embedding_v2_p_demo_2a97516c354b"}]
         return [
             {
                 "kind": "Method",
@@ -204,12 +240,24 @@ class SearchClient:
         ]
 
 
+class LegacySearchClient(SearchClient):
+    def run(self, query, parameters=None, *, write=False):
+        if query == "SHOW VECTOR INDEX INFO":
+            self.calls.append(
+                {"query": query, "parameters": dict(parameters or {}), "write": write}
+            )
+            return [{"index_name": "code_chunk_embedding_v2"}]
+        return super().run(query, parameters, write=write)
+
+
 class MemorySearchClient:
     def __init__(self):
         self.calls = []
 
     def run(self, query, parameters=None, *, write=False):
         self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
+        if query == "SHOW VECTOR INDEX INFO":
+            return [{"index_name": "memory_chunk_embedding_v2_p_demo_2a97516c354b"}]
         return [
             {
                 "type": ["Task"],
@@ -794,13 +842,14 @@ def test_code_search_omits_text_and_dedupes_by_default():
 
     assert len(result["hits"]) == 1
     assert "text" not in result["hits"][0]
-    assert "chunk.text AS text" not in client.calls[0]["query"]
-    assert "CALL vector_search.search($index, $limit, queryVector)" in client.calls[0]["query"]
+    call = vector_search_call(client)
+    assert "chunk.text AS text" not in call["query"]
+    assert "CALL vector_search.search($index, $limit, queryVector)" in call["query"]
     assert (
-        client.calls[0]["parameters"]["index"]
+        call["parameters"]["index"]
         == "code_chunk_embedding_v2_p_demo_2a97516c354b"
     )
-    assert client.calls[0]["parameters"]["rag_roles"] == ["primary", "file"]
+    assert call["parameters"]["rag_roles"] == ["primary", "file"]
     assert "hasMore" not in result["meta"]
 
 
@@ -810,7 +859,7 @@ def test_code_search_demotes_synthetic_methods_before_stored_rag_role():
 
     tools.code_search("hot path")
 
-    query = client.calls[0]["query"]
+    query = vector_search_call(client)["query"]
     assert "coalesce(source.startLine, 0) <= 0" in query
     synthetic_index = query.index("THEN 'synthetic'")
     stored_role_index = query.index("ELSE coalesce(chunk.ragRole, 'primary')")
@@ -825,7 +874,7 @@ def test_code_search_can_include_bounded_text():
 
     assert result["hits"][0]["text"].endswith("...")
     assert len(result["hits"][0]["text"]) <= 23
-    assert "chunk.text AS text" in client.calls[0]["query"]
+    assert "chunk.text AS text" in vector_search_call(client)["query"]
 
 
 def test_code_search_compression_hook_is_noop():
@@ -899,7 +948,28 @@ def test_code_search_can_include_secondary_chunks():
 
     tools.code_search("hot path", include_secondary=True)
 
-    assert client.calls[0]["parameters"]["rag_roles"] == []
+    assert vector_search_call(client)["parameters"]["rag_roles"] == []
+
+
+def test_code_search_falls_back_to_configured_base_vector_index():
+    client = LegacySearchClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    tools.code_search("hot path")
+
+    assert vector_search_call(client)["parameters"]["index"] == "code_chunk_embedding_v2"
+
+
+def test_server_status_prefers_project_vector_indexes_and_falls_back_to_base():
+    client = StatusClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.server_status()
+
+    assert [row["index_name"] for row in result["vectorIndexes"]] == [
+        "code_chunk_embedding_v2",
+        "memory_chunk_embedding_v2_p_demo_2a97516c354b",
+    ]
 
 
 def test_memory_search_uses_project_scoped_vector_index():
@@ -909,9 +979,10 @@ def test_memory_search_uses_project_scoped_vector_index():
     result = tools.memory_search("active task")
 
     assert result["hits"][0]["id"] == "TASK-demo"
-    assert "CALL vector_search.search($index, $limit, queryVector)" in client.calls[0]["query"]
+    call = vector_search_call(client)
+    assert "CALL vector_search.search($index, $limit, queryVector)" in call["query"]
     assert (
-        client.calls[0]["parameters"]["index"]
+        call["parameters"]["index"]
         == "memory_chunk_embedding_v2_p_demo_2a97516c354b"
     )
 

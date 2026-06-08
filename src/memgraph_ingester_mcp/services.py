@@ -143,12 +143,46 @@ def _project_vector_index_name(base_index_name: str, project: str) -> str:
 
 
 def _project_index_token(project: str) -> str:
-    slug = CAMEL_BOUNDARY_RE.sub("_", project.lower()).strip("_")
-    slug = re.sub(r"_+", "_", slug)
-    slug = "".join(ch for ch in slug if ch.isascii() and (ch.isalnum() or ch == "_"))
-    slug = slug[:PROJECT_TOKEN_SLUG_LIMIT].strip("_") or "project"
+    slug = _project_index_slug(project)
     digest = sha256(project.encode()).hexdigest()[:PROJECT_TOKEN_HASH_LENGTH]
     return f"p_{slug}_{digest}"
+
+
+def _project_index_slug(project: str) -> str:
+    slug = []
+    pending_underscore = False
+    for ch in project:
+        if ch.isascii() and ch.isalnum():
+            if pending_underscore and slug:
+                slug.append("_")
+            slug.append(ch.lower())
+            pending_underscore = False
+        elif slug:
+            pending_underscore = True
+        if len(slug) >= PROJECT_TOKEN_SLUG_LIMIT:
+            break
+    return "".join(slug) or "project"
+
+
+def _select_vector_index_name(
+    base_index_name: str,
+    project: str,
+    available_index_names: set[str],
+) -> str:
+    project_index_name = _project_vector_index_name(base_index_name, project)
+    if project_index_name in available_index_names:
+        return project_index_name
+    if base_index_name in available_index_names:
+        return base_index_name
+    return project_index_name
+
+
+def _vector_index_names(rows: Sequence[Mapping[str, Any]]) -> set[str]:
+    return {
+        str(row.get("index_name"))
+        for row in rows
+        if row.get("index_name") is not None
+    }
 
 
 def _first(value: Any) -> Any:
@@ -651,11 +685,28 @@ class MemgraphIngesterTools(CodeContextMixin):
         result.pop("project", None)
         return result
 
+    def _select_vector_index_name(self, base_index_name: str, project: str) -> str:
+        return _select_vector_index_name(
+            base_index_name,
+            project,
+            _vector_index_names(self.client.run("SHOW VECTOR INDEX INFO")),
+        )
+
     def server_status(self, project: str | None = None) -> dict[str, Any]:
         project_name = self.resolve_project(project)
+        vector_index_rows = self.client.run("SHOW VECTOR INDEX INFO")
+        available_index_names = _vector_index_names(vector_index_rows)
         vector_index_names = {
-            _project_vector_index_name(self.config.code_embedding_index_name, project_name),
-            _project_vector_index_name(self.config.memory_embedding_index_name, project_name),
+            _select_vector_index_name(
+                self.config.code_embedding_index_name,
+                project_name,
+                available_index_names,
+            ),
+            _select_vector_index_name(
+                self.config.memory_embedding_index_name,
+                project_name,
+                available_index_names,
+            ),
         }
         languages = self.client.run(
             """
@@ -691,7 +742,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         )
         indexes = [
             row
-            for row in self.client.run("SHOW VECTOR INDEX INFO")
+            for row in vector_index_rows
             if row.get("index_name") in vector_index_names
         ]
         return {
@@ -790,7 +841,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         output_format: str = "json",
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
-        index_name = _project_vector_index_name(
+        index_name = self._select_vector_index_name(
             self.config.code_embedding_index_name,
             project_name,
         )
@@ -2750,7 +2801,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         limit: int = 5,
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
-        index_name = _project_vector_index_name(
+        index_name = self._select_vector_index_name(
             self.config.memory_embedding_index_name,
             project_name,
         )
