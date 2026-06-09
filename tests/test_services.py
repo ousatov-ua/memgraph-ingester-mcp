@@ -427,6 +427,58 @@ class ImpactClient:
         return []
 
 
+class MissingEdgeImpactClient:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, query, parameters=None, *, write=False):
+        self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
+        if "RETURN count(hit) AS count" in query:
+            return [{"count": 0}]
+        if "target.signature AS signature" in query:
+            return [
+                {
+                    "signature": (
+                        "demo.writer.GraphWriter.refreshCodeChunkEmbeddings(Settings, boolean)"
+                    ),
+                    "owner": "GraphWriter",
+                    "ownerFqn": "demo.writer.GraphWriter",
+                    "name": "refreshCodeChunkEmbeddings",
+                    "startLine": 620,
+                    "endLine": 623,
+                    "files": ["src/main/java/demo/writer/GraphWriter.java"],
+                }
+            ]
+        if "HAS_RAG_CHUNK" in query and "textReference" in query:
+            return [
+                {
+                    "depth": 1,
+                    "callerSignature": "demo.ingestion.IngestionOrchestrator.refresh()",
+                    "callerOwner": "IngestionOrchestrator",
+                    "callerOwnerFqn": "demo.ingestion.IngestionOrchestrator",
+                    "callerName": "refresh",
+                    "callerStartLine": 400,
+                    "callerEndLine": 420,
+                    "callerPath": "src/main/java/demo/ingestion/IngestionOrchestrator.java",
+                    "viaSignature": None,
+                    "viaOwner": None,
+                    "viaOwnerFqn": None,
+                    "viaName": None,
+                    "viaPath": None,
+                    "targetSignature": (
+                        "demo.writer.GraphWriter.refreshCodeChunkEmbeddings(Settings, boolean)"
+                    ),
+                    "targetOwner": "GraphWriter",
+                    "targetOwnerFqn": "demo.writer.GraphWriter",
+                    "targetName": "refreshCodeChunkEmbeddings",
+                    "targetPath": "src/main/java/demo/writer/GraphWriter.java",
+                    "inferred": True,
+                    "evidence": "textReference",
+                }
+            ]
+        return []
+
+
 class UniversalFlowClient:
     def __init__(self):
         self.calls = []
@@ -516,6 +568,85 @@ class UniversalFlowClient:
                     "exactish": True,
                     "termMatches": 1,
                 }
+            ]
+        return []
+
+
+class FuzzyTestContextClient:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, query, parameters=None, *, write=False):
+        self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
+        if "MATCH (test:Method" in query and "-[:CALLS]->" in query:
+            return [
+                {
+                    "owner": "Writer",
+                    "name": "refresh",
+                    "path": "src/main/java/demo/Writer.java",
+                    "startLine": 10,
+                    "endLine": 20,
+                    "testOwner": "WriterTest",
+                    "testName": "refreshes",
+                }
+            ]
+        if "RETURN file.path AS path, file.language AS language" in query:
+            return [{"path": "src/test/java/demo/WriterTest.java", "language": "java"}]
+        if "MATCH (test:Method" in query:
+            return [
+                {
+                    "owner": "OtherWriterTest",
+                    "name": "refreshesSomethingElse",
+                    "path": "src/test/java/demo/OtherWriterTest.java",
+                    "startLine": 30,
+                    "endLine": 40,
+                    "exactish": False,
+                    "termMatches": 3,
+                }
+            ]
+        return []
+
+
+class MixedTestContextClient:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, query, parameters=None, *, write=False):
+        self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
+        if "MATCH (test:Method" in query and "-[:CALLS]->" in query:
+            return [
+                {
+                    "owner": "Writer",
+                    "name": "refresh",
+                    "path": "src/main/java/demo/Writer.java",
+                    "startLine": 10,
+                    "endLine": 20,
+                    "testOwner": "WriterTest",
+                    "testName": "refreshes",
+                }
+            ]
+        if "RETURN file.path AS path, file.language AS language" in query:
+            return [{"path": "src/test/java/demo/WriterTest.java", "language": "java"}]
+        if "MATCH (test:Method" in query:
+            return [
+                {
+                    "owner": "WriterTest",
+                    "name": "refreshes",
+                    "path": "src/test/java/demo/WriterTest.java",
+                    "startLine": 30,
+                    "endLine": 40,
+                    "exactish": True,
+                    "termMatches": 3,
+                },
+                {
+                    "owner": "OtherWriterTest",
+                    "name": "refreshesSomethingElse",
+                    "path": "src/test/java/demo/OtherWriterTest.java",
+                    "startLine": 50,
+                    "endLine": 60,
+                    "exactish": False,
+                    "termMatches": 3,
+                },
             ]
         return []
 
@@ -1813,6 +1944,37 @@ def test_code_impact_returns_targets_and_boundary_flags():
     assert "format" not in result["meta"]
 
 
+def test_code_impact_uses_text_reference_fallback_when_call_edges_are_missing():
+    client = MissingEdgeImpactClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_impact("refreshCodeChunkEmbeddings")
+
+    assert result["impacts"] == [
+        {
+            "depth": 1,
+            "owner": "IngestionOrchestrator",
+            "name": "refresh",
+            "path": "src/main/java/demo/ingestion/IngestionOrchestrator.java",
+            "startLine": 400,
+            "endLine": 420,
+            "targetOwner": "GraphWriter",
+            "targetName": "refreshCodeChunkEmbeddings",
+            "isTest": False,
+            "crossesPackageBoundary": True,
+            "inferred": True,
+            "evidence": "textReference",
+        }
+    ]
+    assert result["meta"]["inference"] == "textReference"
+    fallback_call = client.calls[-1]
+    assert fallback_call["parameters"]["target_terms"] == [
+        "refreshCodeChunkEmbeddings(",
+        "refreshCodeChunkEmbeddings (",
+    ]
+    assert fallback_call["parameters"]["fallback_limit"] == 11
+
+
 def test_code_impact_can_return_file_view():
     client = ImpactClient()
     tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
@@ -1863,6 +2025,17 @@ def test_code_operation_hot_paths_returns_risk_hints():
     ]
     assert client.calls[-1]["parameters"]["owner_fragment"] == "writer"
     assert client.calls[-1]["parameters"]["path_contains"] == "demo"
+    assert client.calls[-1]["parameters"]["custom_fragments"] is False
+    assert "sinkNameText CONTAINS fragment" in client.calls[-1]["query"]
+
+
+def test_code_operation_hot_paths_allows_custom_signature_fragments():
+    client = UniversalFlowClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    tools.code_operation_hot_paths(sink_fragments=["writer"], output_format="json")
+
+    assert client.calls[-1]["parameters"]["custom_fragments"] is True
 
 
 def test_code_resource_risk_scan_returns_compact_resource_risks():
@@ -1925,6 +2098,61 @@ def test_code_test_context_anchors_class_method_fragments():
     assert test_query_params["owner_fragment"] == "WriterTest"
     assert test_query_params["min_term_matches"] == 3
     assert "terms" not in result["meta"]
+
+
+def test_code_test_context_suppresses_fuzzy_rows_without_exact_match():
+    client = FuzzyTestContextClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_test_context(
+        "WriterTest.refreshesDirtyCodeEmbeddingsInWatchMode",
+        output_format="json",
+    )
+
+    assert result["tests"] == []
+    assert result["productionCallees"] == []
+    assert result["testFiles"] == [
+        {"path": "src/test/java/demo/WriterTest.java", "language": "java"}
+    ]
+    assert result["meta"] == {
+        "exactMatches": 0,
+        "fuzzyMatchesSuppressed": True,
+        "fuzzyMatchCount": 1,
+    }
+    assert not any("-[:CALLS]->" in call["query"] for call in client.calls)
+
+
+def test_code_test_context_suppresses_fuzzy_rows_when_exact_match_exists():
+    client = MixedTestContextClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_test_context("refreshes", output_format="json")
+
+    assert result["tests"] == [
+        {
+            "owner": "WriterTest",
+            "name": "refreshes",
+            "path": "src/test/java/demo/WriterTest.java",
+            "startLine": 30,
+            "endLine": 40,
+        }
+    ]
+    assert result["productionCallees"] == [
+        {
+            "owner": "Writer",
+            "name": "refresh",
+            "path": "src/main/java/demo/Writer.java",
+            "startLine": 10,
+            "endLine": 20,
+            "testOwner": "WriterTest",
+            "testName": "refreshes",
+        }
+    ]
+    assert result["meta"] == {
+        "exactMatches": 1,
+        "fuzzyMatchesSuppressed": True,
+        "fuzzyMatchCount": 1,
+    }
 
 
 def test_memory_orientation_can_be_compact():

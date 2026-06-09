@@ -212,7 +212,14 @@ def _package_name(owner_fqn: str | None) -> str | None:
 
 
 def _is_test_path(path: str | None) -> bool:
-    return bool(path and (path.startswith("src/test/") or "/test/" in path))
+    return bool(
+        path
+        and (
+            path.startswith(("src/test/", "test/", "tests/"))
+            or "/test/" in path
+            or "/tests/" in path
+        )
+    )
 
 
 def _bounded_depth(depth: int) -> int:
@@ -1628,6 +1635,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             "fragment": signature_fragment,
             "skip": skip_value,
             "limit": limit_value,
+            "impact_limit": limit_value + 1,
             "depth": depth_value,
             "include_tests": include_tests,
         }
@@ -1713,43 +1721,33 @@ class MemgraphIngesterTools(CodeContextMixin):
                    targetFile.path AS targetPath
             ORDER BY depth, callerSignature, viaSignature, targetSignature
             SKIP $skip
-            LIMIT $limit
+            LIMIT $impact_limit
             """,
             params,
         )
-        count_rows = self.client.run(
-            """
-            CALL {
-              MATCH (caller:Method {project: $project})
-                -[:CALLS]->(target:Method {project: $project})
-              WHERE target.signature CONTAINS $fragment
-              OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
-              OPTIONAL MATCH (targetFile:File {project: $project})-[:DEFINES]->(target)
-              WITH callerFile, targetFile
-              WHERE $include_tests
-                 OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
-                 AND (targetFile.path IS NULL OR NOT targetFile.path STARTS WITH 'src/test/'))
-              RETURN 1 AS hit
-              UNION ALL
-              MATCH (caller:Method {project: $project})
-                -[:CALLS]->(via:Method {project: $project})
-                -[:CALLS]->(target:Method {project: $project})
-              WHERE $depth >= 2 AND target.signature CONTAINS $fragment
-              OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
-              OPTIONAL MATCH (viaFile:File {project: $project})-[:DEFINES]->(via)
-              OPTIONAL MATCH (targetFile:File {project: $project})-[:DEFINES]->(target)
-              WITH callerFile, viaFile, targetFile
-              WHERE $include_tests
-                 OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
-                 AND (viaFile.path IS NULL OR NOT viaFile.path STARTS WITH 'src/test/')
-                 AND (targetFile.path IS NULL OR NOT targetFile.path STARTS WITH 'src/test/'))
-              RETURN 1 AS hit
-            }
-            RETURN count(hit) AS count
-            """,
-            params,
+        impact_rows, result_meta_extra = _trim_overfetch(
+            impact_rows,
+            skip=skip_value,
+            limit=limit_value,
+            include_count=False,
         )
-        total_count = count_rows[0].get("count", 0) if count_rows else len(impact_rows)
+        if not impact_rows and target_rows:
+            fallback_rows = self._code_impact_text_reference_rows(
+                params,
+                target_rows,
+                skip=skip_value,
+                limit=limit_value,
+            )
+            impact_rows, fallback_page_extra = _trim_overfetch(
+                fallback_rows,
+                skip=skip_value,
+                limit=limit_value,
+                include_count=False,
+            )
+            if impact_rows:
+                result_meta_extra = {"inference": "textReference"}
+                if fallback_page_extra:
+                    result_meta_extra.update(fallback_page_extra)
 
         targets = [
             {
@@ -1767,6 +1765,11 @@ class MemgraphIngesterTools(CodeContextMixin):
         impacts = [self._format_impact_row(row, compact) for row in impact_rows]
         if view == "files":
             file_rows = self._impact_file_rows(targets, impacts)
+            file_meta_extra = (
+                {"inference": result_meta_extra["inference"]}
+                if result_meta_extra and "inference" in result_meta_extra
+                else None
+            )
             return self._finalize_response(
                 _with_result_meta(
                     {
@@ -1778,6 +1781,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                     skip=0,
                     limit=limit_value,
                     total_count=len(file_rows),
+                    extra=file_meta_extra,
                 ),
                 output_format,
             )
@@ -1791,9 +1795,86 @@ class MemgraphIngesterTools(CodeContextMixin):
                 impacts,
                 skip=skip_value,
                 limit=limit_value,
-                total_count=total_count,
+                extra=result_meta_extra,
             ),
             output_format,
+        )
+
+    def _code_impact_text_reference_rows(
+        self,
+        params: Mapping[str, Any],
+        target_rows: Sequence[Mapping[str, Any]],
+        *,
+        skip: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        target_names = sorted(
+            {
+                name
+                for row in target_rows
+                if (name := (row.get("name") or _method_name(row.get("signature"))))
+                and len(name) >= 4
+            }
+        )
+        target_signatures = sorted(
+            {signature for row in target_rows if (signature := row.get("signature"))}
+        )
+        if not target_names or not target_signatures:
+            return []
+        target_terms = [term for name in target_names for term in (f"{name}(", f"{name} (")]
+        return self.client.run(
+            """
+            MATCH (caller:Method {project: $project})
+              -[:HAS_RAG_CHUNK]->(chunk:CodeChunk {project: $project})
+            WHERE any(term IN $target_terms WHERE chunk.text CONTAINS term)
+            MATCH (target:Method {project: $project})
+            WHERE target.signature IN $target_signatures
+              AND (chunk.text CONTAINS (target.name + '(')
+                OR chunk.text CONTAINS (target.name + ' ('))
+              AND caller <> target
+            OPTIONAL MATCH (caller)-[edge:CALLS]->(target)
+            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
+            OPTIONAL MATCH (targetFile:File {project: $project})-[:DEFINES]->(target)
+            WITH caller, target, chunk, callerFile, targetFile, count(edge) AS existingEdges
+            WHERE existingEdges = 0
+              AND (
+                $include_tests
+                OR (
+                  (callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
+                  AND (targetFile.path IS NULL OR NOT targetFile.path STARTS WITH 'src/test/')
+                )
+              )
+            RETURN DISTINCT 1 AS depth,
+                   caller.signature AS callerSignature,
+                   caller.ownerDisplayName AS callerOwner,
+                   caller.ownerFqn AS callerOwnerFqn,
+                   caller.name AS callerName,
+                   caller.startLine AS callerStartLine,
+                   caller.endLine AS callerEndLine,
+                   callerFile.path AS callerPath,
+                   null AS viaSignature,
+                   null AS viaOwner,
+                   null AS viaOwnerFqn,
+                   null AS viaName,
+                   null AS viaPath,
+                   target.signature AS targetSignature,
+                   target.ownerDisplayName AS targetOwner,
+                   target.ownerFqn AS targetOwnerFqn,
+                   target.name AS targetName,
+                   targetFile.path AS targetPath,
+                   true AS inferred,
+                   'textReference' AS evidence
+            ORDER BY callerPath, callerStartLine, callerSignature, targetSignature
+            SKIP $skip
+            LIMIT $fallback_limit
+            """,
+            {
+                **params,
+                "target_signatures": target_signatures,
+                "target_terms": target_terms,
+                "skip": skip,
+                "fallback_limit": limit + 1,
+            },
         )
 
     def _impact_file_rows(
@@ -1877,6 +1958,8 @@ class MemgraphIngesterTools(CodeContextMixin):
             or _method_name(enriched.get("targetSignature")),
             "isTest": enriched.get("isTest"),
             "crossesPackageBoundary": crosses_pkg,
+            "inferred": enriched.get("inferred"),
+            "evidence": enriched.get("evidence"),
         }
 
     def code_callers(
@@ -2265,7 +2348,9 @@ class MemgraphIngesterTools(CodeContextMixin):
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         bounded_limit = _bounded_limit(limit, default=DISCOVERY_LIMIT, maximum=50)
-        fragments = _normalize_lower_list(sink_fragments) or sorted(DEFAULT_OPERATION_SINKS)
+        fragments = _normalize_lower_list(sink_fragments)
+        custom_fragments = bool(fragments)
+        fragments = fragments or sorted(DEFAULT_OPERATION_SINKS)
         owner_filter = (owner_fragment or "").strip().lower()
         path_filter = (path_contains or "").strip()
         rows = self.client.run(
@@ -2274,12 +2359,17 @@ class MemgraphIngesterTools(CodeContextMixin):
               -[call:CALLS]->(sink:Method {project: $project})
             OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(caller)
             WITH caller, sink, file, call,
-                 toLower(coalesce(sink.name, '') + ' ' + coalesce(sink.signature, '')) AS sinkText,
+                 toLower(coalesce(sink.name, '')) AS sinkNameText,
+                 toLower(coalesce(sink.ownerDisplayName, '') + ' '
+                         + coalesce(sink.ownerFqn, '') + ' '
+                         + coalesce(sink.signature, '')) AS sinkFullText,
                  toLower(coalesce(caller.ownerDisplayName, '') + ' '
                          + coalesce(caller.ownerFqn, '') + ' '
                          + coalesce(caller.signature, '')) AS callerText
             WHERE ($include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/')
-              AND any(fragment IN $fragments WHERE sinkText CONTAINS fragment)
+              AND any(fragment IN $fragments
+                      WHERE sinkNameText CONTAINS fragment
+                         OR ($custom_fragments AND sinkFullText CONTAINS fragment))
               AND ($owner_fragment = '' OR callerText CONTAINS $owner_fragment)
               AND ($path_contains = '' OR file.path CONTAINS $path_contains)
             WITH caller, file,
@@ -2312,6 +2402,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "owner_fragment": owner_filter,
                 "path_contains": path_filter,
                 "include_tests": include_tests,
+                "custom_fragments": custom_fragments,
                 "limit": bounded_limit,
             },
         )
@@ -2587,7 +2678,11 @@ class MemgraphIngesterTools(CodeContextMixin):
                          + coalesce(file.path, '')) AS haystack
             WITH test, file, haystack,
                  size([term IN $terms WHERE haystack CONTAINS term]) AS termMatches
-            WHERE file.path STARTS WITH 'src/test/'
+            WHERE (file.path STARTS WITH 'src/test/'
+                OR file.path STARTS WITH 'test/'
+                OR file.path STARTS WITH 'tests/'
+                OR file.path CONTAINS '/test/'
+                OR file.path CONTAINS '/tests/')
               AND (test.signature CONTAINS $fragment
                 OR test.name CONTAINS $fragment
                 OR file.path CONTAINS $fragment
@@ -2616,50 +2711,15 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "limit": bounded_limit,
             },
         )
-        production_rows = self.client.run(
-            """
-            MATCH (test:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
-            OPTIONAL MATCH (testFile:File {project: $project})-[:DEFINES]->(test)
-            OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
-            WITH test, callee, testFile, calleeFile,
-                 toLower(coalesce(test.signature, '') + ' ' + coalesce(test.name, '') + ' '
-                         + coalesce(testFile.path, '')) AS haystack
-            WITH test, callee, testFile, calleeFile, haystack,
-                 size([term IN $terms WHERE haystack CONTAINS term]) AS termMatches
-            WHERE testFile.path STARTS WITH 'src/test/'
-              AND NOT calleeFile.path STARTS WITH 'src/test/'
-              AND (test.signature CONTAINS $fragment
-                OR test.name CONTAINS $fragment
-                OR testFile.path CONTAINS $fragment
-                OR ($owner_fragment <> ''
-                    AND (test.ownerDisplayName CONTAINS $owner_fragment
-                      OR test.signature CONTAINS $owner_fragment
-                      OR testFile.path CONTAINS $owner_fragment))
-                OR termMatches >= $min_term_matches)
-            RETURN DISTINCT callee.ownerDisplayName AS owner,
-                   callee.name AS name,
-                   calleeFile.path AS path,
-                   callee.startLine AS startLine,
-                   callee.endLine AS endLine,
-                   test.ownerDisplayName AS testOwner,
-                   test.name AS testName
-            ORDER BY path, startLine, name
-            LIMIT $limit
-            """,
-            {
-                "project": project_name,
-                "fragment": test_fragment,
-                "owner_fragment": owner_fragment,
-                "terms": terms,
-                "min_term_matches": min_term_matches,
-                "limit": bounded_production_limit,
-            },
-        )
         file_rows = self.client.run(
             """
             MATCH (file:File {project: $project})
             WITH file, toLower(file.path) AS haystack
-            WHERE file.path STARTS WITH 'src/test/'
+            WHERE (file.path STARTS WITH 'src/test/'
+                OR file.path STARTS WITH 'test/'
+                OR file.path STARTS WITH 'tests/'
+                OR file.path CONTAINS '/test/'
+                OR file.path CONTAINS '/tests/')
               AND (file.path CONTAINS $fragment
                 OR ($owner_fragment <> '' AND file.path CONTAINS $owner_fragment)
                 OR size([term IN $terms WHERE haystack CONTAINS term]) >= $min_term_matches)
@@ -2677,6 +2737,44 @@ class MemgraphIngesterTools(CodeContextMixin):
             },
         )
         exact_matches = sum(1 for row in rows if row.get("exactish"))
+        fuzzy_match_count = len(rows) - exact_matches
+        rows = [row for row in rows if row.get("exactish")]
+        production_rows = []
+        if exact_matches > 0:
+            production_rows = self.client.run(
+                """
+                MATCH (test:Method {project: $project})
+                  -[:CALLS]->(callee:Method {project: $project})
+                OPTIONAL MATCH (testFile:File {project: $project})-[:DEFINES]->(test)
+                OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
+                WITH test, callee, testFile, calleeFile
+                WHERE (testFile.path STARTS WITH 'src/test/'
+                    OR testFile.path STARTS WITH 'test/'
+                    OR testFile.path STARTS WITH 'tests/'
+                    OR testFile.path CONTAINS '/test/'
+                    OR testFile.path CONTAINS '/tests/')
+                  AND NOT (calleeFile.path STARTS WITH 'src/test/'
+                    OR calleeFile.path STARTS WITH 'test/'
+                    OR calleeFile.path STARTS WITH 'tests/'
+                    OR calleeFile.path CONTAINS '/test/'
+                    OR calleeFile.path CONTAINS '/tests/')
+                  AND (test.signature CONTAINS $fragment OR test.name = $fragment)
+                RETURN DISTINCT callee.ownerDisplayName AS owner,
+                       callee.name AS name,
+                       calleeFile.path AS path,
+                       callee.startLine AS startLine,
+                       callee.endLine AS endLine,
+                       test.ownerDisplayName AS testOwner,
+                       test.name AS testName
+                ORDER BY path, startLine, name
+                LIMIT $limit
+                """,
+                {
+                    "project": project_name,
+                    "fragment": test_fragment,
+                    "limit": bounded_production_limit,
+                },
+            )
         for row in rows:
             row.pop("signature", None)
             row.pop("exactish", None)
@@ -2684,13 +2782,17 @@ class MemgraphIngesterTools(CodeContextMixin):
         production_rows = [r for r in production_rows if r.get("name") != "<init>"]
         for row in production_rows:
             row.pop("signature", None)
+        meta: dict[str, Any] = {"exactMatches": exact_matches}
+        if fuzzy_match_count:
+            meta["fuzzyMatchesSuppressed"] = True
+            meta["fuzzyMatchCount"] = fuzzy_match_count
         return self._finalize_response(
             {
                 "project": project_name,
                 "tests": rows,
                 "productionCallees": production_rows,
                 "testFiles": file_rows,
-                "meta": {"exactMatches": exact_matches},
+                "meta": meta,
             },
             output_format,
         )
