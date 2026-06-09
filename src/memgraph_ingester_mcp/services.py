@@ -1192,7 +1192,8 @@ class MemgraphIngesterTools(CodeContextMixin):
             WITH source, chunk, effectiveRole, matchedTerms,
                  size(matchedTerms) AS termMatches,
                  size([term IN matchedTerms WHERE nameLower CONTAINS term]) AS nameMatches
-            ORDER BY nameMatches DESC, termMatches DESC, chunk.path, source.startLine, chunk.sourceId
+            ORDER BY nameMatches DESC, termMatches DESC, chunk.path, source.startLine, 
+            chunk.sourceId
             LIMIT $limit
             RETURN coalesce(chunk.sourceLabel, labels(source)[0]) AS kind,
                    chunk.sourceId AS sourceId,

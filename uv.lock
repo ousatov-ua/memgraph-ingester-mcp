@@ -310,7 +310,7 @@ wheels = [
 
 [[package]]
 name = "memgraph-ingester-mcp"
-version = "0.5.6"
+version = "0.5.7"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
