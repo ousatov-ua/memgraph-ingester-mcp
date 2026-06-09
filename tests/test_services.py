@@ -976,10 +976,7 @@ def test_code_search_omits_text_and_dedupes_by_default():
     call = vector_search_call(client)
     assert "chunk.text AS text" not in call["query"]
     assert "CALL vector_search.search($index, $limit, queryVector)" in call["query"]
-    assert (
-        call["parameters"]["index"]
-        == "code_chunk_embedding_v2_p_demo_2a97516c354b"
-    )
+    assert call["parameters"]["index"] == "code_chunk_embedding_v2_p_demo_2a97516c354b"
     assert call["parameters"]["rag_roles"] == ["primary", "file"]
     assert "hasMore" not in result["meta"]
 
@@ -1091,6 +1088,123 @@ def test_code_search_falls_back_to_configured_base_vector_index():
     assert vector_search_call(client)["parameters"]["index"] == "code_chunk_embedding_v2"
 
 
+class HybridSearchClient:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, query, parameters=None, *, write=False):
+        self.calls.append({"query": query, "parameters": dict(parameters or {}), "write": write})
+        if query == "SHOW VECTOR INDEX INFO":
+            return [{"index_name": "code_chunk_embedding_v2_p_demo_2a97516c354b"}]
+        if "CALL vector_search.search" in query:
+            return [
+                {
+                    "kind": "Method",
+                    "sourceId": "demo.Foo.a()",
+                    "owner": "Foo",
+                    "name": "a",
+                    "path": "src/main/java/demo/Foo.java",
+                    "startLine": 10,
+                    "endLine": 20,
+                    "score": 0.9,
+                }
+            ]
+        return [
+            {
+                "kind": "Method",
+                "sourceId": "demo.Bar.b()",
+                "owner": "Bar",
+                "name": "b",
+                "path": "src/main/java/demo/Bar.java",
+                "startLine": 5,
+                "endLine": 9,
+                "termMatches": 2,
+            }
+        ]
+
+
+class VectorFailingClient(HybridSearchClient):
+    def run(self, query, parameters=None, *, write=False):
+        if "CALL vector_search.search" in query:
+            self.calls.append(
+                {"query": query, "parameters": dict(parameters or {}), "write": write}
+            )
+            raise MemgraphError("vector index unavailable")
+        return super().run(query, parameters, write=write)
+
+
+def test_code_search_fuses_lexical_only_hits():
+    client = HybridSearchClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_search("refreshDirtyEmbeddings after rename")
+
+    hits = result["hits"]
+    assert [hit["name"] for hit in hits] == ["a", "b"]
+    assert hits[0]["score"] == 0.9
+    assert "score" not in hits[1]
+    assert hits[1]["termMatches"] == 2
+
+
+def test_code_search_embeds_query_variants():
+    client = HybridSearchClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    tools.code_search("refreshDirtyEmbeddings after rename")
+
+    call = vector_search_call(client)
+    assert "CALL embeddings.text($queries, $embed_config)" in call["query"]
+    assert call["parameters"]["queries"] == [
+        "refreshDirtyEmbeddings after rename",
+        "refresh dirty embeddings after rename",
+    ]
+    assert call["parameters"]["embed_config"] == {}
+
+
+def test_code_search_pins_configured_embedding_model():
+    client = HybridSearchClient()
+    config = MemgraphConfig(default_project="demo", embedding_model_name="all-MiniLM-L6-v2")
+    tools = MemgraphIngesterTools(client, config)
+
+    tools.code_search("hot path")
+
+    call = vector_search_call(client)
+    assert call["parameters"]["embed_config"] == {"model_name": "all-MiniLM-L6-v2"}
+
+
+def test_code_search_skips_lexical_leg_when_dedupe_disabled():
+    client = HybridSearchClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_search("refreshDirtyEmbeddings after rename", dedupe_by_source=False)
+
+    assert [hit["name"] for hit in result["hits"]] == ["a"]
+    assert not any("search_terms" in call["parameters"] for call in client.calls)
+
+
+def test_code_search_falls_back_to_lexical_when_vector_unavailable():
+    client = VectorFailingClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    result = tools.code_search("refreshDirtyEmbeddings after rename")
+
+    assert [hit["name"] for hit in result["hits"]] == ["b"]
+    assert result["meta"]["vectorUnavailable"] is True
+
+
+def test_memory_refresh_embeddings_excludes_metadata_properties():
+    client = FakeClient()
+    tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
+
+    tools.memory_refresh_embeddings(["MCH-1"])
+
+    call = next(c for c in client.calls if "embeddings.node_sentence" in c["query"])
+    config = call["parameters"]["embed_config"]
+    assert config["embedding_property"] == "embedding"
+    assert "textHash" in config["excluded_properties"]
+    assert "text" not in config["excluded_properties"]
+
+
 def test_server_status_prefers_project_vector_indexes_and_falls_back_to_base():
     client = StatusClient()
     tools = MemgraphIngesterTools(client, MemgraphConfig(default_project="demo"))
@@ -1112,10 +1226,8 @@ def test_memory_search_uses_project_scoped_vector_index():
     assert result["hits"][0]["id"] == "TASK-demo"
     call = vector_search_call(client)
     assert "CALL vector_search.search($index, $limit, queryVector)" in call["query"]
-    assert (
-        call["parameters"]["index"]
-        == "memory_chunk_embedding_v2_p_demo_2a97516c354b"
-    )
+    assert call["parameters"]["index"] == "memory_chunk_embedding_v2_p_demo_2a97516c354b"
+    assert call["parameters"]["embed_config"] == {}
 
 
 def test_code_text_search_returns_compact_hits():
@@ -1223,7 +1335,8 @@ def test_code_flow_context_bundles_anchors_files_and_edges():
         "endLine",
         "score",
     ]
-    assert result["lexicalAnchors"] == []
+    # Lexical anchors are always fused now, even when vector hits already cover enough paths.
+    assert result["lexicalAnchors"]["rows"]
     assert result["files"]["rows"][0][0] == "src/main/java/demo/Writer.java"
     assert result["flowEdges"]["rows"] == [
         [

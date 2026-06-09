@@ -81,7 +81,7 @@ def create_server(
         include_keys: bool = False,
         format: str = "table_json",
     ) -> dict[str, Any]:
-        """Search CodeChunk embeddings and return source-linked discovery hits."""
+        """Hybrid CodeChunk search: vector + lexical signals fused by reciprocal rank."""
 
         return tools.code_search(
             query=query,

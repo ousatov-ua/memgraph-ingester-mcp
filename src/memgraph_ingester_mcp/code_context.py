@@ -262,11 +262,9 @@ class CodeContextMixin:
                 )
 
         lexical_rows: list[dict[str, Any]] = []
-        lexical_terms = (
-            services._lexical_query_terms(query, min_length=4)[:16]
-            if len(path_scores) < bounded_file_limit
-            else []
-        )
+        # Always fuse lexical evidence: weak-but-diverse vector hits would otherwise lock in
+        # wrong paths and the whole flow expansion would be spent on them.
+        lexical_terms = services._lexical_query_terms(query, min_length=4)[:16]
         if lexical_terms:
             lexical = self.code_text_search(
                 project=project_name,

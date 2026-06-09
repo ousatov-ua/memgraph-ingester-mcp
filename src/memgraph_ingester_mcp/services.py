@@ -91,6 +91,21 @@ DISCOVERY_LIMIT = 5
 LOOKUP_LIMIT = 10
 CALL_GRAPH_LIMIT = 10
 MEMBER_LIMIT = 25
+RRF_K = 60
+# Mirrors MEMORY_CHUNK_METADATA_PROPERTIES in the ingester's EmbeddingSettings so MCP-side
+# MemoryChunk refreshes produce embeddings consistent with ingester-side refreshes.
+MEMORY_CHUNK_EXCLUDED_PROPERTIES = (
+    "id",
+    "project",
+    "sourceLabel",
+    "sourceId",
+    "textHash",
+    "embedding",
+    "embeddingModel",
+    "embeddingDimensions",
+    "createdAt",
+    "updatedAt",
+)
 DEFAULT_OPERATION_SINKS = frozenset(
     {
         "batch",
@@ -178,11 +193,7 @@ def _select_vector_index_name(
 
 
 def _vector_index_names(rows: Sequence[Mapping[str, Any]]) -> set[str]:
-    return {
-        str(row.get("index_name"))
-        for row in rows
-        if row.get("index_name") is not None
-    }
+    return {str(row.get("index_name")) for row in rows if row.get("index_name") is not None}
 
 
 def _first(value: Any) -> Any:
@@ -433,6 +444,88 @@ def _lexical_query_terms(value: str | None, *, min_length: int = 3) -> list[str]
     ]
 
 
+def _query_variants(query: str) -> list[str]:
+    """Return the raw query plus a keyword variant when it adds embedding signal.
+
+    The keyword variant lowercases and camel-splits the query so identifier-style
+    queries also match the split-word vocabulary embedded in chunk texts.
+    """
+    variants = [query]
+    keyword_variant = " ".join(_lexical_query_terms(query))
+    if keyword_variant and keyword_variant != query.strip().lower():
+        variants.append(keyword_variant)
+    return variants
+
+
+def _passes_chunk_filters(
+    row: Mapping[str, Any],
+    *,
+    kind_filter: frozenset[str] | set[str],
+    path_prefix_filter: Sequence[str],
+    path_contains_filter: str,
+    owner_filter: str,
+    min_score: float,
+) -> bool:
+    """Apply code_search post-filters; min_score only gates rows carrying a vector score."""
+    if kind_filter and row.get("kind") not in kind_filter:
+        return False
+    if not _starts_with_any(row.get("path"), path_prefix_filter):
+        return False
+    if path_contains_filter and path_contains_filter not in (row.get("path") or ""):
+        return False
+    if owner_filter and not _contains_any(row.get("owner"), [owner_filter]):
+        return False
+    return not (min_score > 0 and "score" in row and float(row.get("score") or 0) < min_score)
+
+
+def _dedupe_chunk_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the first (best-ranked) row per (kind, sourceId)."""
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        key = (row.get("kind") or "", row.get("sourceId") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(dict(row))
+    return deduped
+
+
+def _rrf_fuse(
+    vector_rows: Sequence[Mapping[str, Any]],
+    lexical_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge two ranked candidate lists with reciprocal rank fusion.
+
+    Rank-based fusion is immune to the uncalibrated absolute similarity scores; vector
+    rows win ties via their score and contribute the row payload, lexical rows attach
+    termMatches when they agree on the same chunk.
+    """
+    fused: dict[tuple[str, str], dict[str, Any]] = {}
+    scores: dict[tuple[str, str], float] = {}
+    for rank, row in enumerate(vector_rows):
+        key = (row.get("kind") or "", row.get("sourceId") or "")
+        fused.setdefault(key, dict(row))
+        scores[key] = scores.get(key, 0.0) + 1.0 / (RRF_K + rank + 1)
+    for rank, row in enumerate(lexical_rows):
+        key = (row.get("kind") or "", row.get("sourceId") or "")
+        if key in fused:
+            if row.get("termMatches") is not None:
+                fused[key]["termMatches"] = row.get("termMatches")
+        else:
+            fused[key] = dict(row)
+        scores[key] = scores.get(key, 0.0) + 1.0 / (RRF_K + rank + 1)
+    ordered = sorted(
+        fused.items(),
+        key=lambda item: (
+            -scores[item[0]],
+            -float(item[1].get("score") or 0.0),
+            item[1].get("path") or "",
+        ),
+    )
+    return [row for _key, row in ordered]
+
+
 def _test_fragment_parts(value: str | None) -> tuple[str, str, list[str], int]:
     fragment = (value or "").strip()
     if "." not in fragment:
@@ -495,9 +588,7 @@ def _to_table_json(value: Any) -> Any:
         live_columns = [col for col in columns if any(row.get(col) is not None for row in value)]
         return {
             "cols": live_columns,
-            "rows": [
-                [_to_table_json(row.get(col)) for col in live_columns] for row in value
-            ],
+            "rows": [[_to_table_json(row.get(col)) for col in live_columns] for row in value],
         }
     return value
 
@@ -699,6 +790,28 @@ class MemgraphIngesterTools(CodeContextMixin):
             _vector_index_names(self.client.run("SHOW VECTOR INDEX INFO")),
         )
 
+    def _embedding_text_config(self) -> dict[str, Any]:
+        """Config for embeddings.text: pin the model when one is explicitly configured.
+
+        Keeps query embeddings on the same model as document embeddings instead of
+        relying implicitly on the module default.
+        """
+        model_name = (self.config.embedding_model_name or "").strip()
+        if not model_name or model_name == "default":
+            return {}
+        return {"model_name": model_name}
+
+    def _node_sentence_config(self) -> dict[str, Any]:
+        """Config for embeddings.node_sentence on MemoryChunk nodes.
+
+        Excludes metadata properties exactly like the ingester does so both refresh
+        paths produce embeddings from the same text.
+        """
+        config = self._embedding_text_config()
+        config["embedding_property"] = "embedding"
+        config["excluded_properties"] = list(MEMORY_CHUNK_EXCLUDED_PROPERTIES)
+        return config
+
     def server_status(self, project: str | None = None) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         vector_index_rows = self.client.run("SHOW VECTOR INDEX INFO")
@@ -747,11 +860,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             """,
             {"project": project_name},
         )
-        indexes = [
-            row
-            for row in vector_index_rows
-            if row.get("index_name") in vector_index_names
-        ]
+        indexes = [row for row in vector_index_rows if row.get("index_name") in vector_index_names]
         return {
             "project": project_name,
             "languages": languages,
@@ -898,11 +1007,11 @@ class MemgraphIngesterTools(CodeContextMixin):
             """
         )
         search_query = """
-            CALL embeddings.text([$query], {}) YIELD embeddings
-            WITH embeddings[0] AS queryVector
+            CALL embeddings.text($queries, $embed_config) YIELD embeddings
+            UNWIND embeddings AS queryVector
             CALL vector_search.search($index, $limit, queryVector)
             YIELD node AS chunk, similarity
-            WITH chunk, similarity
+            WITH chunk, max(similarity) AS similarity
             WHERE chunk.project = $project
               AND ($include_tests OR chunk.path IS NULL OR NOT chunk.path STARTS WITH 'src/test/')
             MATCH (source {project: $project})-[:HAS_RAG_CHUNK]->(chunk)
@@ -936,50 +1045,64 @@ class MemgraphIngesterTools(CodeContextMixin):
             RETURN __RETURN_PROJECTION__
             ORDER BY similarity DESC
             """.replace("__RETURN_PROJECTION__", return_projection.strip())
-        raw_rows = self.client.run(
-            search_query,
-            {
-                "index": index_name,
-                "project": project_name,
-                "query": query,
-                "limit": fetch_limit,
-                "include_tests": include_tests,
-                "rag_roles": role_filter,
-                "kinds": list(kind_filter),
-                "path_prefixes": path_prefix_filter,
-                "path_contains": path_contains_filter,
-                "owner_fragment": owner_filter,
-                "min_score": min_score,
-            },
-        )
-        filtered_rows: list[dict[str, Any]] = []
-        for row in raw_rows:
-            if kind_filter and row.get("kind") not in kind_filter:
-                continue
-            if not _starts_with_any(row.get("path"), path_prefix_filter):
-                continue
-            if path_contains_filter and path_contains_filter not in (row.get("path") or ""):
-                continue
-            if owner_filter and not _contains_any(row.get("owner"), [owner_filter]):
-                continue
-            if min_score > 0 and float(row.get("score") or 0) < min_score:
-                continue
-            filtered_rows.append(row)
-        rows = filtered_rows
+        variants = _query_variants(query)
+        lexical_terms = _lexical_query_terms(query) if dedupe_by_source else []
+        vector_unavailable = False
+        raw_rows: list[dict[str, Any]] = []
+        try:
+            raw_rows = self.client.run(
+                search_query,
+                {
+                    "index": index_name,
+                    "project": project_name,
+                    "queries": variants,
+                    "embed_config": self._embedding_text_config(),
+                    "limit": fetch_limit,
+                    "include_tests": include_tests,
+                    "rag_roles": role_filter,
+                    "kinds": list(kind_filter),
+                    "path_prefixes": path_prefix_filter,
+                    "path_contains": path_contains_filter,
+                    "owner_fragment": owner_filter,
+                    "min_score": min_score,
+                },
+            )
+        except MemgraphError:
+            if not lexical_terms:
+                raise
+            vector_unavailable = True
+        raw_lexical_rows: list[dict[str, Any]] = []
+        if lexical_terms:
+            raw_lexical_rows = self._lexical_chunk_rows(
+                project_name,
+                required_terms=[],
+                optional_terms=lexical_terms,
+                limit=fetch_limit,
+                include_tests=include_tests,
+                include_text=include_text,
+                kind_filter=list(kind_filter),
+                role_filter=role_filter,
+                path_contains_filter=path_contains_filter,
+            )
+
+        def passes(row: Mapping[str, Any]) -> bool:
+            return _passes_chunk_filters(
+                row,
+                kind_filter=kind_filter,
+                path_prefix_filter=path_prefix_filter,
+                path_contains_filter=path_contains_filter,
+                owner_filter=owner_filter,
+                min_score=min_score,
+            )
+
+        filtered_vector = [row for row in raw_rows if passes(row)]
         if dedupe_by_source:
-            deduped: list[dict[str, Any]] = []
-            seen: set[tuple[str, str]] = set()
-            for row in rows:
-                key = (row.get("kind") or "", row.get("sourceId") or "")
-                if key in seen:
-                    continue
-                seen.add(key)
-                deduped.append(row)
-                if len(deduped) >= bounded_limit:
-                    break
-            rows = deduped
+            rows = _rrf_fuse(
+                _dedupe_chunk_rows(filtered_vector),
+                _dedupe_chunk_rows([row for row in raw_lexical_rows if passes(row)]),
+            )[:bounded_limit]
         else:
-            rows = rows[:bounded_limit]
+            rows = filtered_vector[:bounded_limit]
         for row in rows:
             if include_text:
                 row["text"] = _compact_text(row.get("text"), bounded_text_limit)
@@ -989,50 +1112,39 @@ class MemgraphIngesterTools(CodeContextMixin):
                 row.pop("sourceId", None)
                 row.pop("ragRole", None)
             row["owner"] = _compact_owner(row.get("owner"), row.get("name"))
-        saturated = len(raw_rows) >= fetch_limit
+        saturated = len(raw_rows) >= fetch_limit or len(raw_lexical_rows) >= fetch_limit
+        extra: dict[str, Any] = {}
+        if saturated:
+            extra["candidateLimitReached"] = True
+        if vector_unavailable:
+            extra["vectorUnavailable"] = True
         return self._finalize_response(
             _with_result_meta(
                 {"project": project_name, "hits": rows},
                 rows,
                 limit=bounded_limit,
-                extra={"candidateLimitReached": True} if saturated else None,
+                extra=extra or None,
             ),
             output_format,
         )
 
-    def code_text_search(
+    def _lexical_chunk_rows(
         self,
-        query: str | None = None,
-        project: str | None = None,
-        all_terms: Sequence[str] | str | None = None,
-        any_terms: Sequence[str] | str | None = None,
-        limit: int = DISCOVERY_LIMIT,
-        include_tests: bool = False,
-        include_text: bool = False,
-        text_limit: int = 160,
-        kinds: Sequence[str] | str | None = None,
-        include_secondary: bool = False,
-        rag_roles: Sequence[str] | str | None = None,
-        path_contains: str | None = None,
-        output_format: str = "json",
-    ) -> dict[str, Any]:
-        project_name = self.resolve_project(project)
-        bounded_limit = _bounded_limit(limit, default=DISCOVERY_LIMIT, maximum=50)
-        bounded_text_limit = _bounded_text_limit(text_limit)
-        required_terms = _normalize_lower_list(all_terms)
-        optional_terms = _normalize_lower_list(any_terms)
-        if query and not required_terms and not optional_terms:
-            optional_terms = _lexical_query_terms(query)
-        if not required_terms and not optional_terms:
-            raise MemgraphError("Provide query, all_terms, or any_terms.")
-        search_terms = required_terms + optional_terms
-        kind_filter = _normalize_string_list(kinds)
-        role_filter = _normalize_string_list(rag_roles)
-        if not role_filter and not include_secondary:
-            role_filter = list(DEFAULT_RAG_ROLES)
-        path_contains_filter = (path_contains or "").strip()
+        project_name: str,
+        *,
+        required_terms: Sequence[str],
+        optional_terms: Sequence[str],
+        limit: int,
+        include_tests: bool,
+        include_text: bool,
+        kind_filter: Sequence[str],
+        role_filter: Sequence[str],
+        path_contains_filter: str,
+    ) -> list[dict[str, Any]]:
+        """Run the shared lexical chunk query; rows keep sourceId/ragRole for callers."""
+        search_terms = list(required_terms) + list(optional_terms)
         text_projection = ", chunk.text AS text" if include_text else ""
-        rows = self.client.run(
+        return self.client.run(
             f"""
             MATCH (source {{project: $project}})
               -[:HAS_RAG_CHUNK]->(chunk:CodeChunk {{project: $project}})
@@ -1072,15 +1184,57 @@ class MemgraphIngesterTools(CodeContextMixin):
             """,
             {
                 "project": project_name,
-                "all_terms": required_terms,
-                "any_terms": optional_terms,
+                "all_terms": list(required_terms),
+                "any_terms": list(optional_terms),
                 "search_terms": search_terms,
-                "kinds": kind_filter,
-                "rag_roles": role_filter,
+                "kinds": list(kind_filter),
+                "rag_roles": list(role_filter),
                 "path_contains": path_contains_filter,
                 "include_tests": include_tests,
-                "limit": bounded_limit,
+                "limit": limit,
             },
+        )
+
+    def code_text_search(
+        self,
+        query: str | None = None,
+        project: str | None = None,
+        all_terms: Sequence[str] | str | None = None,
+        any_terms: Sequence[str] | str | None = None,
+        limit: int = DISCOVERY_LIMIT,
+        include_tests: bool = False,
+        include_text: bool = False,
+        text_limit: int = 160,
+        kinds: Sequence[str] | str | None = None,
+        include_secondary: bool = False,
+        rag_roles: Sequence[str] | str | None = None,
+        path_contains: str | None = None,
+        output_format: str = "json",
+    ) -> dict[str, Any]:
+        project_name = self.resolve_project(project)
+        bounded_limit = _bounded_limit(limit, default=DISCOVERY_LIMIT, maximum=50)
+        bounded_text_limit = _bounded_text_limit(text_limit)
+        required_terms = _normalize_lower_list(all_terms)
+        optional_terms = _normalize_lower_list(any_terms)
+        if query and not required_terms and not optional_terms:
+            optional_terms = _lexical_query_terms(query)
+        if not required_terms and not optional_terms:
+            raise MemgraphError("Provide query, all_terms, or any_terms.")
+        kind_filter = _normalize_string_list(kinds)
+        role_filter = _normalize_string_list(rag_roles)
+        if not role_filter and not include_secondary:
+            role_filter = list(DEFAULT_RAG_ROLES)
+        path_contains_filter = (path_contains or "").strip()
+        rows = self._lexical_chunk_rows(
+            project_name,
+            required_terms=required_terms,
+            optional_terms=optional_terms,
+            limit=bounded_limit,
+            include_tests=include_tests,
+            include_text=include_text,
+            kind_filter=kind_filter,
+            role_filter=role_filter,
+            path_contains_filter=path_contains_filter,
         )
         for row in rows:
             if include_text:
@@ -2421,10 +2575,14 @@ class MemgraphIngesterTools(CodeContextMixin):
             ]
         extra: dict[str, Any] | None = None
         if owner_filter or path_filter:
-            extra = {k: v for k, v in (
-                ("ownerFragment", owner_filter),
-                ("pathContains", path_filter),
-            ) if v}
+            extra = {
+                k: v
+                for k, v in (
+                    ("ownerFragment", owner_filter),
+                    ("pathContains", path_filter),
+                )
+                if v
+            }
         return self._finalize_response(
             _with_result_meta(
                 {"project": project_name, "operationHotPaths": rows},
@@ -2917,7 +3075,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         )
         rows = self.client.run(
             """
-            CALL embeddings.text([$query], {}) YIELD embeddings
+            CALL embeddings.text([$query], $embed_config) YIELD embeddings
             WITH embeddings[0] AS queryVector
             CALL vector_search.search($index, $limit, queryVector)
             YIELD node AS chunk, similarity
@@ -2933,6 +3091,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "index": index_name,
                 "project": project_name,
                 "query": query,
+                "embed_config": self._embedding_text_config(),
                 "limit": _bounded_limit(limit, default=5, maximum=20),
             },
         )
@@ -3174,12 +3333,14 @@ class MemgraphIngesterTools(CodeContextMixin):
                 project_name,
                 embed=embed,
             )
-        return self._finalize_response({
-            "project": project_name,
-            "resolved": bool(rows),
-            "links": rows,
-            "chunk": chunk_result,
-        })
+        return self._finalize_response(
+            {
+                "project": project_name,
+                "resolved": bool(rows),
+                "links": rows,
+                "chunk": chunk_result,
+            }
+        )
 
     def memory_refresh_chunk(
         self,
@@ -3285,11 +3446,15 @@ class MemgraphIngesterTools(CodeContextMixin):
             ORDER BY chunk.id
             WITH collect(chunk) AS chunks
             WITH chunks, [chunk IN chunks | chunk.id] AS embeddedIds
-            CALL embeddings.node_sentence(chunks, {})
+            CALL embeddings.node_sentence(chunks, $embed_config)
             YIELD success, dimension
             RETURN success AS success, dimension AS dimension, embeddedIds AS ids
             """,
-            {"project": project_name, "ids": pending_ids},
+            {
+                "project": project_name,
+                "ids": pending_ids,
+                "embed_config": self._node_sentence_config(),
+            },
             write=True,
         )
         embed_success = result[0].get("success", False) if result else False
