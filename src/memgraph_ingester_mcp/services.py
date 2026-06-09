@@ -1515,7 +1515,8 @@ class MemgraphIngesterTools(CodeContextMixin):
         limit_value = _bounded_limit(limit, default=LOOKUP_LIMIT, maximum=200)
         # Split on whitespace for AND semantics: "GraphWriter upsertFile" matches methods whose
         # signature contains both terms rather than the exact joined string.
-        fragment_terms = [t.strip().lower() for t in (signature_fragment or "").split() if t.strip()]
+        fragment_terms = [t.strip().lower() for t
+                          in (signature_fragment or "").split() if t.strip()]
         return_projection = (
             """
                    method.name AS name, method.ownerDisplayName AS ownerDisplayName,
