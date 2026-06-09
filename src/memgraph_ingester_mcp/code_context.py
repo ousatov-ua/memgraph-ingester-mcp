@@ -66,7 +66,11 @@ class CodeContextMixin:
             """
             MATCH (file:File {project: $project})
             WHERE any(fragment IN $fragments WHERE file.path CONTAINS fragment)
-              AND ($include_tests OR NOT file.path STARTS WITH 'src/test/')
+              AND ($include_tests OR NOT (file.path STARTS WITH 'src/test/'
+                   OR file.path STARTS WITH 'test/'
+                   OR file.path STARTS WITH 'tests/'
+                   OR file.path CONTAINS '/test/'
+                   OR file.path CONTAINS '/tests/'))
             WITH file
             ORDER BY file.path
             LIMIT $limit

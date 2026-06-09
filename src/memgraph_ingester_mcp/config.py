@@ -24,14 +24,24 @@ def _float_env(name: str, default: float) -> float:
     value = getenv(name)
     if value is None or value == "":
         return default
-    return float(value)
+    try:
+        return float(value)
+    except ValueError:
+        raise ValueError(
+            f"Environment variable {name!r} has an invalid float value: {value!r}."
+        ) from None
 
 
 def _int_env(name: str, default: int) -> int:
     value = getenv(name)
     if value is None or value == "":
         return default
-    return int(value)
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError(
+            f"Environment variable {name!r} has an invalid integer value: {value!r}."
+        ) from None
 
 
 @dataclass(frozen=True)

@@ -2610,7 +2610,12 @@ class MemgraphIngesterTools(CodeContextMixin):
         response["meta"] = {"limit": bounded_limit}
         return self._finalize_response(response, output_format)
 
-    def code_hierarchy(self, fqn: str, project: str | None = None) -> dict[str, Any]:
+    def code_hierarchy(
+        self,
+        fqn: str,
+        project: str | None = None,
+        output_format: str = "json",
+    ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         class_hierarchy = self.client.run(
             """
@@ -2644,12 +2649,15 @@ class MemgraphIngesterTools(CodeContextMixin):
             """,
             {"project": project_name, "fqn": fqn},
         )
-        return {
-            "project": project_name,
-            "classHierarchy": class_hierarchy,
-            "ancestors": ancestors,
-            "interfaceImplementors": implementors,
-        }
+        return self._finalize_response(
+            {
+                "project": project_name,
+                "classHierarchy": class_hierarchy,
+                "ancestors": ancestors,
+                "interfaceImplementors": implementors,
+            },
+            output_format,
+        )
 
     def code_test_context(
         self,
@@ -2928,7 +2936,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "limit": _bounded_limit(limit, default=5, maximum=20),
             },
         )
-        return {"project": project_name, "query": query, "hits": rows}
+        return self._finalize_response({"project": project_name, "query": query, "hits": rows})
 
     def memory_get(
         self,
@@ -3166,12 +3174,12 @@ class MemgraphIngesterTools(CodeContextMixin):
                 project_name,
                 embed=embed,
             )
-        return {
+        return self._finalize_response({
             "project": project_name,
             "resolved": bool(rows),
             "links": rows,
             "chunk": chunk_result,
-        }
+        })
 
     def memory_refresh_chunk(
         self,
@@ -3180,6 +3188,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         project: str | None = None,
         *,
         embed: bool = True,
+        finalize: bool = True,
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         spec = _memory_spec(memory_type)
@@ -3217,24 +3226,30 @@ class MemgraphIngesterTools(CodeContextMixin):
         )
         embedding_result = None
         if embed:
-            embedding_result = self.memory_refresh_embeddings([chunk_id], project_name)
+            embedding_result = self.memory_refresh_embeddings(
+                [chunk_id], project_name, finalize=False
+            )
             if rows and chunk_id in set(embedding_result.get("embedded", [])):
                 rows[0]["dirty"] = False
-        return {
+        response = {
             "project": project_name,
             "chunk": rows[0] if rows else None,
             "embedding": embedding_result,
         }
+        return self._finalize_response(response) if finalize else response
 
     def memory_refresh_embeddings(
         self,
         chunk_ids: Sequence[str],
         project: str | None = None,
+        *,
+        finalize: bool = True,
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         ids = [chunk_id for chunk_id in dict.fromkeys(chunk_ids) if chunk_id]
         if not ids:
-            return {"project": project_name, "embedded": []}
+            response = {"project": project_name, "embedded": []}
+            return self._finalize_response(response) if finalize else response
 
         pending = self.client.run(
             """
@@ -3259,7 +3274,8 @@ class MemgraphIngesterTools(CodeContextMixin):
         )
         pending_ids = [row["id"] for row in pending]
         if not pending_ids:
-            return {"project": project_name, "embedded": []}
+            response = {"project": project_name, "embedded": []}
+            return self._finalize_response(response) if finalize else response
 
         result = self.client.run(
             """
@@ -3276,6 +3292,11 @@ class MemgraphIngesterTools(CodeContextMixin):
             {"project": project_name, "ids": pending_ids},
             write=True,
         )
+        embed_success = result[0].get("success", False) if result else False
+        if not embed_success:
+            response = {"project": project_name, "embedded": [], "result": result}
+            return self._finalize_response(response) if finalize else response
+
         dimension = result[0].get("dimension") if result else self.config.embedding_dimensions
         self.client.run(
             """
@@ -3295,7 +3316,8 @@ class MemgraphIngesterTools(CodeContextMixin):
             },
             write=True,
         )
-        return {"project": project_name, "embedded": pending_ids, "result": result}
+        response = {"project": project_name, "embedded": pending_ids, "result": result}
+        return self._finalize_response(response) if finalize else response
 
     def raw_read_cypher(
         self,

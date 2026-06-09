@@ -474,10 +474,14 @@ def create_server(
         return tools.code_quality_stats(project, include_tests, limit, format)
 
     @compact_tool
-    def code_hierarchy(fqn: str, project: str | None = None) -> dict[str, Any]:
+    def code_hierarchy(
+        fqn: str,
+        project: str | None = None,
+        format: str = "table_json",
+    ) -> dict[str, Any]:
         """Return class ancestry, children, interfaces, and interface implementors."""
 
-        return tools.code_hierarchy(fqn, project)
+        return tools.code_hierarchy(fqn, project, output_format=format)
 
     @compact_tool
     def code_test_context(
