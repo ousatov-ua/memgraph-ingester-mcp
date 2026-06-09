@@ -278,11 +278,13 @@ class CodeContextMixin:
 
         for index, row in enumerate(lexical_rows):
             path = row.get("path")
-            if path:
+            # Exclude file-role chunks: their Words line aggregates all method names and
+            # matches almost any query, drowning out the vector-ranked primary chunks.
+            if path and row.get("kind") != "File":
                 term_matches = int(row.get("termMatches") or 1)
                 path_scores[path] = (
                     path_scores.get(path, 0.0)
-                    + (term_matches * 12.0)
+                    + (term_matches * 4.0)
                     + (bounded_anchor_limit - index)
                 )
 
@@ -372,17 +374,21 @@ class CodeContextMixin:
             files = [row for row in all_files if row.get("path") in selected_path_set]
             related_files = [row for row in all_files if row.get("path") in related_path_set]
 
-        rows_for_meta = semantic_rows + lexical_rows + flow_edges + related_files
+        result: dict[str, Any] = {
+            "project": project_name,
+            "anchors": semantic_rows,
+            "files": files,
+            "relatedFiles": related_files,
+            "flowEdges": flow_edges,
+        }
+        if normalized_detail == "full":
+            result["lexicalAnchors"] = lexical_rows
+        rows_for_meta = semantic_rows + flow_edges + related_files
+        if normalized_detail == "full":
+            rows_for_meta = rows_for_meta + lexical_rows
         return self._finalize_response(
             services._with_result_meta(
-                {
-                    "project": project_name,
-                    "anchors": semantic_rows,
-                    "lexicalAnchors": lexical_rows,
-                    "files": files,
-                    "relatedFiles": related_files,
-                    "flowEdges": flow_edges,
-                },
+                result,
                 rows_for_meta,
                 limit=bounded_anchor_limit,
             ),

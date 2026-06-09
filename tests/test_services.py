@@ -107,7 +107,7 @@ class FakeClient:
                 }
             ]
 
-        if "WHERE method.signature CONTAINS $fragment" in query:
+        if "WHERE all(term IN $fragment_terms WHERE" in query:
             if "RETURN count(method) AS count" in query:
                 return [{"count": 1}]
             return [
@@ -278,7 +278,7 @@ class CallGraphClient:
     def run(self, query, parameters=None, *, write=False):
         params = dict(parameters or {})
         self.calls.append({"query": query, "parameters": params, "write": write})
-        if "WHERE method.signature CONTAINS $fragment" in query:
+        if "WHERE all(term IN $fragment_terms WHERE" in query:
             if "RETURN count(method) AS count" in query:
                 return [{"count": 1}]
             return [
@@ -1335,9 +1335,10 @@ def test_code_flow_context_bundles_anchors_files_and_edges():
         "endLine",
         "score",
     ]
-    # Lexical anchors are always fused now, even when vector hits already cover enough paths.
-    assert result["lexicalAnchors"]["rows"]
-    assert result["files"]["rows"][0][0] == "src/main/java/demo/Writer.java"
+    # lexicalAnchors is compact-detail-hidden by default; only present at detail="full".
+    assert "lexicalAnchors" not in result
+    # Orchestrator has both vector and lexical hits so it ranks first.
+    assert result["files"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
     assert result["flowEdges"]["rows"] == [
         [
             "src/main/java/demo/Orchestrator.java",
@@ -1375,8 +1376,10 @@ def test_code_flow_context_promotes_non_selected_edge_endpoint_files():
         output_format="table_json",
     )
 
-    assert result["files"]["rows"][0][0] == "src/main/java/demo/Writer.java"
-    assert result["relatedFiles"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
+    # Orchestrator has both vector and lexical hits so it becomes the selected file;
+    # Writer.java is promoted as a related file via the flow edge.
+    assert result["files"]["rows"][0][0] == "src/main/java/demo/Orchestrator.java"
+    assert result["relatedFiles"]["rows"][0][0] == "src/main/java/demo/Writer.java"
     assert "detail" not in result["meta"]
 
 

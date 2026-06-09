@@ -62,11 +62,19 @@ HOT_PATH_SECTIONS = frozenset({"largestTypes", "longestMethods", "fanIn", "fanOu
 DEFAULT_RAG_ROLES = ("primary", "file")
 AUTO_QUERY_STOPWORDS = frozenset(
     {
+        "all",
+        "any",
+        "are",
+        "can",
         "class",
+        "does",
         "file",
         "files",
         "from",
         "get",
+        "has",
+        "how",
+        "not",
         "last",
         "line",
         "method",
@@ -80,10 +88,15 @@ AUTO_QUERY_STOPWORDS = frozenset(
         "test",
         "tests",
         "that",
+        "the",
         "this",
         "time",
         "type",
         "value",
+        "what",
+        "when",
+        "where",
+        "which",
         "with",
     }
 )
@@ -92,6 +105,10 @@ LOOKUP_LIMIT = 10
 CALL_GRAPH_LIMIT = 10
 MEMBER_LIMIT = 25
 RRF_K = 60
+# Down-weight the lexical leg so file-role chunks with large Words vocabularies don't override
+# vector hits for concept queries. 0.4 gives lexical a meaningful boost for exact-term matches
+# while keeping vector-only hits competitive.
+LEXICAL_RRF_WEIGHT = 0.4
 # Mirrors MEMORY_CHUNK_METADATA_PROPERTIES in the ingester's EmbeddingSettings so MCP-side
 # MemoryChunk refreshes produce embeddings consistent with ingester-side refreshes.
 MEMORY_CHUNK_EXCLUDED_PROPERTIES = (
@@ -475,7 +492,8 @@ def _passes_chunk_filters(
         return False
     if owner_filter and not _contains_any(row.get("owner"), [owner_filter]):
         return False
-    return not (min_score > 0 and "score" in row and float(row.get("score") or 0) < min_score)
+    # Lexical-only rows carry no vector score; drop them when min_score is active.
+    return not (min_score > 0 and ("score" not in row or float(row.get("score") or 0) < min_score))
 
 
 def _dedupe_chunk_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -514,7 +532,7 @@ def _rrf_fuse(
                 fused[key]["termMatches"] = row.get("termMatches")
         else:
             fused[key] = dict(row)
-        scores[key] = scores.get(key, 0.0) + 1.0 / (RRF_K + rank + 1)
+        scores[key] = scores.get(key, 0.0) + LEXICAL_RRF_WEIGHT / (RRF_K + rank + 1)
     ordered = sorted(
         fused.items(),
         key=lambda item: (
@@ -1112,7 +1130,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 row.pop("sourceId", None)
                 row.pop("ragRole", None)
             row["owner"] = _compact_owner(row.get("owner"), row.get("name"))
-        saturated = len(raw_rows) >= fetch_limit or len(raw_lexical_rows) >= fetch_limit
+        saturated = len(raw_rows) >= fetch_limit
         extra: dict[str, Any] = {}
         if saturated:
             extra["candidateLimitReached"] = True
@@ -1495,6 +1513,9 @@ class MemgraphIngesterTools(CodeContextMixin):
         project_name = self.resolve_project(project)
         skip_value = _bounded_skip(skip)
         limit_value = _bounded_limit(limit, default=LOOKUP_LIMIT, maximum=200)
+        # Split on whitespace for AND semantics: "GraphWriter upsertFile" matches methods whose
+        # signature contains both terms rather than the exact joined string.
+        fragment_terms = [t.strip().lower() for t in (signature_fragment or "").split() if t.strip()]
         return_projection = (
             """
                    method.name AS name, method.ownerDisplayName AS ownerDisplayName,
@@ -1513,7 +1534,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         rows = self.client.run(
             """
             MATCH (method:Method {project: $project})
-            WHERE method.signature CONTAINS $fragment
+            WHERE all(term IN $fragment_terms WHERE toLower(method.signature) CONTAINS term)
             OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
             WITH method, file
             WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
@@ -1527,7 +1548,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             ),
             {
                 "project": project_name,
-                "fragment": signature_fragment,
+                "fragment_terms": fragment_terms,
                 "skip": skip_value,
                 "limit": _overfetch_limit(limit_value, include_count),
                 "include_tests": include_tests,
@@ -1555,7 +1576,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             count_rows = self.client.run(
                 """
                 MATCH (method:Method {project: $project})
-                WHERE method.signature CONTAINS $fragment
+                WHERE all(term IN $fragment_terms WHERE toLower(method.signature) CONTAINS term)
                 OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
                 WITH method, file
                 WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
@@ -1563,7 +1584,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                 """,
                 {
                     "project": project_name,
-                    "fragment": signature_fragment,
+                    "fragment_terms": fragment_terms,
                     "include_tests": include_tests,
                 },
             )
