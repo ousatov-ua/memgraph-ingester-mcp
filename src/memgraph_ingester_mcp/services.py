@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from typing import Any
 
+from memgraph_ingester_mcp import queries as Q
 from memgraph_ingester_mcp.code_context import CodeContextMixin
 from memgraph_ingester_mcp.compression import ResponseCompressor
 from memgraph_ingester_mcp.config import MemgraphConfig
@@ -847,35 +848,15 @@ class MemgraphIngesterTools(CodeContextMixin):
             ),
         }
         languages = self.client.run(
-            """
-            MATCH (c:Code {project: $project})
-            RETURN c.language AS language, c.lastIngested AS lastIngested
-            ORDER BY language
-            """,
+            Q.SERVER_STATUS_LANGUAGES,
             {"project": project_name},
         )
         inventory = self.client.run(
-            """
-            MATCH (code:Code {project: $project})
-            OPTIONAL MATCH (file:File {project: $project})
-            WITH collect(DISTINCT code.language) AS languages, count(DISTINCT file) AS files
-            OPTIONAL MATCH (type {project: $project})
-            WHERE type:Class OR type:Interface OR type:Annotation
-            WITH languages, files, count(DISTINCT type) AS types
-            OPTIONAL MATCH (method:Method {project: $project})
-            RETURN size(languages) AS languageCount, files AS fileCount,
-                   types AS typeCount, count(DISTINCT method) AS methodCount
-            """,
+            Q.SERVER_STATUS_INVENTORY,
             {"project": project_name},
         )
         memories = self.client.run(
-            """
-            MATCH (node {project: $project})
-            WHERE node:Decision OR node:ADR OR node:Rule OR node:Context
-               OR node:Finding OR node:Task OR node:Risk OR node:Question OR node:Idea
-            RETURN labels(node)[0] AS type, count(node) AS count
-            ORDER BY type
-            """,
+            Q.SERVER_STATUS_MEMORIES,
             {"project": project_name},
         )
         indexes = [row for row in vector_index_rows if row.get("index_name") in vector_index_names]
@@ -904,53 +885,22 @@ class MemgraphIngesterTools(CodeContextMixin):
         response: dict[str, Any] = {"project": project_name, "sections": sorted(requested)}
         if "languages" in requested:
             response["languages"] = self.client.run(
-                """
-                MATCH (l:Language {project: $project})-[:CONTAINS]->(c:Code)
-                RETURN l.name AS languageName, l.graphName AS graphName, c.language AS language,
-                       c.lastIngested AS lastIngested
-                ORDER BY languageName
-                """,
+                Q.CODE_ORIENTATION_LANGUAGES,
                 {"project": project_name},
             )
         if "packages" in requested:
             response["packages"] = self.client.run(
-                """
-                MATCH (p:Package {project: $project})
-                OPTIONAL MATCH (p)-[:CONTAINS]->(c:Class {project: $project})
-                WITH p, count(DISTINCT c) AS classes
-                RETURN p.language AS language, p.name AS package, classes
-                ORDER BY language, package
-                LIMIT $limit
-                """,
+                Q.CODE_ORIENTATION_PACKAGES,
                 {"project": project_name, "limit": bounded_limit},
             )
         if "largestTypes" in requested:
             response["largestTypes"] = self.client.run(
-                """
-                MATCH (t {project: $project})-[:DECLARES]->(m:Method {project: $project})
-                WHERE (t:Class OR t:Interface OR t:Annotation)
-                  AND coalesce(t.isExternal, false) = false
-                  AND coalesce(m.isSynthetic, false) = false
-                WITH t.fqn AS type, labels(t)[0] AS label, count(m) AS methodCount
-                RETURN type, label, methodCount
-                ORDER BY methodCount DESC, type
-                LIMIT $limit
-                """,
+                Q.CODE_ORIENTATION_LARGEST_TYPES,
                 {"project": project_name, "limit": bounded_limit},
             )
         if "crossOwnerCalls" in requested:
             response["crossOwnerCalls"] = self.client.run(
-                """
-                MATCH (caller:Method {project: $project})
-                  -[:CALLS]->(callee:Method {project: $project})
-                WHERE caller.ownerFqn IS NOT NULL AND callee.ownerFqn IS NOT NULL
-                  AND caller.ownerFqn <> callee.ownerFqn
-                WITH caller.ownerDisplayName + ' -> ' + callee.ownerDisplayName AS edge,
-                     COUNT(*) AS calls
-                RETURN edge, calls
-                ORDER BY calls DESC, edge
-                LIMIT $limit
-                """,
+                Q.CODE_ORIENTATION_CROSS_OWNER_CALLS,
                 {"project": project_name, "limit": bounded_limit},
             )
         return response
@@ -1024,45 +974,7 @@ class MemgraphIngesterTools(CodeContextMixin):
                    round(similarity * 10000) / 10000 AS score
             """
         )
-        search_query = """
-            CALL embeddings.text($queries, $embed_config) YIELD embeddings
-            UNWIND embeddings AS queryVector
-            CALL vector_search.search($index, $limit, queryVector)
-            YIELD node AS chunk, similarity
-            WITH chunk, max(similarity) AS similarity
-            WHERE chunk.project = $project
-              AND ($include_tests OR chunk.path IS NULL OR NOT chunk.path STARTS WITH 'src/test/')
-            MATCH (source {project: $project})-[:HAS_RAG_CHUNK]->(chunk)
-            WITH chunk, source, similarity,
-                 CASE
-                   WHEN chunk.sourceLabel = 'Method'
-                     AND coalesce(source.startLine, 0) <= 0 THEN 'synthetic'
-                   WHEN chunk.sourceLabel = 'Class'
-                     AND coalesce(chunk.kind, source.kind, '') = 'module' THEN 'synthetic'
-                   WHEN chunk.sourceLabel = 'Method'
-                     AND coalesce(chunk.kind, '') = 'constructor' THEN 'secondary'
-                   WHEN chunk.sourceLabel = 'Field' THEN 'secondary'
-                   WHEN chunk.sourceLabel = 'File' THEN 'file'
-                   ELSE coalesce(chunk.ragRole, 'primary')
-                 END AS effectiveRole
-            WHERE size($rag_roles) = 0 OR effectiveRole IN $rag_roles
-            WITH chunk, source, similarity, effectiveRole,
-                 coalesce(chunk.sourceLabel, labels(source)[0]) AS kind,
-                 chunk.sourceId AS sourceId,
-                 coalesce(source.ownerDisplayName, source.ownerFqn, chunk.ownerFqn) AS owner,
-                 coalesce(source.name, chunk.signature, chunk.sourceId) AS name,
-                 chunk.path AS path,
-                 source.startLine AS startLine,
-                 source.endLine AS endLine
-            WHERE (size($kinds) = 0 OR kind IN $kinds)
-              AND (size($path_prefixes) = 0
-                   OR any(prefix IN $path_prefixes WHERE path STARTS WITH prefix))
-              AND ($path_contains = '' OR path CONTAINS $path_contains)
-              AND ($owner_fragment = '' OR coalesce(owner, '') CONTAINS $owner_fragment)
-              AND ($min_score <= 0 OR similarity >= $min_score)
-            RETURN __RETURN_PROJECTION__
-            ORDER BY similarity DESC
-            """.replace("__RETURN_PROJECTION__", return_projection.strip())
+        search_query = Q.CODE_SEARCH.replace("__RETURN_PROJECTION__", return_projection.strip())
         variants = _query_variants(query)
         lexical_terms = _lexical_query_terms(query) if dedupe_by_source else []
         vector_unavailable = False
@@ -1163,48 +1075,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         search_terms = list(required_terms) + list(optional_terms)
         text_projection = ", chunk.text AS text" if include_text else ""
         return self.client.run(
-            f"""
-            MATCH (source {{project: $project}})
-              -[:HAS_RAG_CHUNK]->(chunk:CodeChunk {{project: $project}})
-            WITH source, chunk,
-                 toLower(coalesce(chunk.text, '') + ' ' + coalesce(chunk.path, '') + ' '
-                         + coalesce(chunk.sourceId, '')) AS haystack,
-                 toLower(coalesce(source.name, chunk.name, '')) AS nameLower,
-                 CASE
-                   WHEN chunk.sourceLabel = 'Method'
-                     AND coalesce(source.startLine, 0) <= 0 THEN 'synthetic'
-                   WHEN chunk.sourceLabel = 'Class'
-                     AND coalesce(chunk.kind, source.kind, '') = 'module' THEN 'synthetic'
-                   WHEN chunk.sourceLabel = 'Method'
-                     AND coalesce(chunk.kind, '') = 'constructor' THEN 'secondary'
-                   WHEN chunk.sourceLabel = 'Field' THEN 'secondary'
-                   WHEN chunk.sourceLabel = 'File' THEN 'file'
-                   ELSE coalesce(chunk.ragRole, 'primary')
-                 END AS effectiveRole
-            WITH source, chunk, haystack, nameLower, effectiveRole,
-                 [term IN $search_terms WHERE haystack CONTAINS term] AS matchedTerms
-            WHERE ($include_tests OR chunk.path IS NULL OR NOT chunk.path STARTS WITH 'src/test/')
-              AND (size($all_terms) = 0 OR all(term IN $all_terms WHERE haystack CONTAINS term))
-              AND (size($any_terms) = 0 OR any(term IN $any_terms WHERE haystack CONTAINS term))
-              AND (size($kinds) = 0 OR coalesce(chunk.sourceLabel, labels(source)[0]) IN $kinds)
-              AND (size($rag_roles) = 0 OR effectiveRole IN $rag_roles)
-              AND ($path_contains = '' OR chunk.path CONTAINS $path_contains)
-            WITH source, chunk, effectiveRole, matchedTerms,
-                 size(matchedTerms) AS termMatches,
-                 size([term IN matchedTerms WHERE nameLower CONTAINS term]) AS nameMatches
-            ORDER BY nameMatches DESC, termMatches DESC, chunk.path, source.startLine, 
-            chunk.sourceId
-            LIMIT $limit
-            RETURN coalesce(chunk.sourceLabel, labels(source)[0]) AS kind,
-                   chunk.sourceId AS sourceId,
-                   coalesce(source.ownerDisplayName, source.ownerFqn, chunk.ownerFqn) AS owner,
-                   coalesce(source.name, chunk.signature, chunk.sourceId) AS name,
-                   chunk.path AS path,
-                   effectiveRole AS ragRole,
-                   source.startLine AS startLine,
-                   source.endLine AS endLine,
-                   termMatches{text_projection}
-            """,
+            Q.LEXICAL_CHUNK_ROWS.replace("__TEXT_PROJECTION__", text_projection),
             {
                 "project": project_name,
                 "all_terms": list(required_terms),
@@ -1394,19 +1265,11 @@ class MemgraphIngesterTools(CodeContextMixin):
             )
         )
         types = self.client.run(
-            f"""
-            MATCH (t {{project: $project}})
-            WHERE (t:Class OR t:Interface OR t:Annotation) AND {predicate}
-            OPTIONAL MATCH (file:File {{project: $project}})-[:DEFINES]->(t)
-            WITH t, file
-            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-            WITH t, collect(DISTINCT file.path) AS files
-            ORDER BY t.fqn
-            LIMIT $limit
-            {member_count_cypher}
-            RETURN labels(t) AS labels, t.fqn AS fqn, t.name AS name, t.kind AS kind,
-                   {extra_type_cols}files{member_count_cols}
-            """,
+            Q.CODE_LOOKUP_TYPE
+            .replace("__PREDICATE__", predicate)
+            .replace("__MEMBER_COUNT_CYPHER__", member_count_cypher)
+            .replace("__EXTRA_TYPE_COLS__", extra_type_cols)
+            .replace("__MEMBER_COUNT_COLS__", member_count_cols),
             {
                 "project": project_name,
                 "type_name": type_name,
@@ -1424,14 +1287,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         total_count = None
         if include_count:
             count_rows = self.client.run(
-                f"""
-                MATCH (t {{project: $project}})
-                WHERE (t:Class OR t:Interface OR t:Annotation) AND {predicate}
-                OPTIONAL MATCH (file:File {{project: $project}})-[:DEFINES]->(t)
-                WITH t, file
-                WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-                RETURN count(DISTINCT t) AS count
-                """,
+                Q.CODE_LOOKUP_TYPE_COUNT.replace("__PREDICATE__", predicate),
                 {
                     "project": project_name,
                     "type_name": type_name,
@@ -1465,13 +1321,9 @@ class MemgraphIngesterTools(CodeContextMixin):
                     """
                 )
                 item["methods"] = self.client.run(
-                    f"""
-                    MATCH (t {{project: $project, fqn: $fqn}})-[:DECLARES]->(m:Method)
-                    WHERE (t:Class OR t:Interface OR t:Annotation)
-                    RETURN {method_projection.strip()}
-                    ORDER BY m.name, m.signature
-                    LIMIT $limit
-                    """,
+                    Q.CODE_LOOKUP_TYPE_MEMBERS_METHODS.replace(
+                        "__METHOD_PROJECTION__", method_projection.strip()
+                    ),
                     {"project": project_name, "fqn": item_fqn, "limit": bounded_member_limit},
                 )
                 field_projection = (
@@ -1484,13 +1336,9 @@ class MemgraphIngesterTools(CodeContextMixin):
                     """
                 )
                 item["fields"] = self.client.run(
-                    f"""
-                    MATCH (t {{project: $project, fqn: $fqn}})-[:DECLARES]->(field:Field)
-                    WHERE (t:Class OR t:Interface OR t:Annotation)
-                    RETURN {field_projection.strip()}
-                    ORDER BY field.name
-                    LIMIT $limit
-                    """,
+                    Q.CODE_LOOKUP_TYPE_MEMBERS_FIELDS.replace(
+                        "__FIELD_PROJECTION__", field_projection.strip()
+                    ),
                     {"project": project_name, "fqn": item_fqn, "limit": bounded_member_limit},
                 )
         return self._finalize_response(
@@ -1542,18 +1390,9 @@ class MemgraphIngesterTools(CodeContextMixin):
         # mixing in alphabetically earlier signatures that merely reference the class.
         owner_rank = "CASE WHEN toLower(ownerDisplayName) IN $fragment_terms THEN 0 ELSE 1 END"
         rows = self.client.run(
-            """
-            MATCH (method:Method {project: $project})
-            WHERE all(term IN $fragment_terms WHERE toLower(method.signature) CONTAINS term)
-            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
-            WITH method, file
-            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-            WITH method, collect(DISTINCT file.path) AS files
-            RETURN __RETURN_PROJECTION__
-            ORDER BY __ORDER_BY__
-            SKIP $skip
-            LIMIT $limit
-            """.replace("__RETURN_PROJECTION__", return_projection.strip()).replace(
+            Q.CODE_LOOKUP_METHODS
+            .replace("__RETURN_PROJECTION__", return_projection.strip())
+            .replace(
                 "__ORDER_BY__",
                 f"{owner_rank}, " + ("sortSignature" if compact else "signature"),
             ),
@@ -1606,14 +1445,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         total_count = None
         if include_count:
             count_rows = self.client.run(
-                """
-                MATCH (method:Method {project: $project})
-                WHERE all(term IN $fragment_terms WHERE toLower(method.signature) CONTAINS term)
-                OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
-                WITH method, file
-                WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-                RETURN count(DISTINCT method) AS count
-                """,
+                Q.CODE_LOOKUP_METHODS_COUNT,
                 {
                     "project": project_name,
                     "fragment_terms": fragment_terms,
@@ -1665,20 +1497,9 @@ class MemgraphIngesterTools(CodeContextMixin):
             """
         )
         rows = self.client.run(
-            f"""
-            MATCH (field:Field {{project: $project}})
-            WHERE field.fqn CONTAINS $fragment OR field.name = $fragment
-            OPTIONAL MATCH (owner {{project: $project}})-[:DECLARES]->(field)
-            WHERE owner:Class OR owner:Interface OR owner:Annotation
-            OPTIONAL MATCH (file:File {{project: $project}})-[:DEFINES]->(field)
-            WITH field, owner, file
-            WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-            WITH field, owner, collect(DISTINCT file.path) AS files
-            RETURN {projection.strip()}
-            ORDER BY __ORDER_BY__
-            SKIP $skip
-            LIMIT $limit
-            """.replace("__ORDER_BY__", "sortKey" if compact else "fqn"),
+            Q.CODE_LOOKUP_FIELD
+            .replace("__PROJECTION__", projection.strip())
+            .replace("__ORDER_BY__", "sortKey" if compact else "fqn"),
             {
                 "project": project_name,
                 "fragment": field_fragment,
@@ -1708,14 +1529,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         total_count = None
         if include_count:
             count_rows = self.client.run(
-                """
-                MATCH (field:Field {project: $project})
-                WHERE field.fqn CONTAINS $fragment OR field.name = $fragment
-                OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(field)
-                WITH field, file
-                WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-                RETURN count(DISTINCT field) AS count
-                """,
+                Q.CODE_LOOKUP_FIELD_COUNT,
                 {
                     "project": project_name,
                     "fragment": field_fragment,
@@ -1763,20 +1577,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             """
         )
         rows = self.client.run(
-            f"""
-            MATCH (file:File {{project: $project}})
-            WHERE file.path CONTAINS $fragment
-              AND ($include_tests OR NOT file.path STARTS WITH 'src/test/')
-            OPTIONAL MATCH (file)-[:DEFINES]->(definition {{project: $project}})
-            WITH file, count(DISTINCT definition) AS definitionCount
-            OPTIONAL MATCH (chunk:CodeChunk {{project: $project}})
-            WHERE chunk.path = file.path
-            WITH file, definitionCount, count(DISTINCT chunk) AS chunkCount
-            RETURN {projection.strip()}
-            ORDER BY file.path
-            SKIP $skip
-            LIMIT $limit
-            """,
+            Q.CODE_LOOKUP_FILE.replace("__PROJECTION__", projection.strip()),
             {
                 "project": project_name,
                 "fragment": path_fragment,
@@ -1794,12 +1595,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         total_count = None
         if include_count:
             count_rows = self.client.run(
-                """
-                MATCH (file:File {project: $project})
-                WHERE file.path CONTAINS $fragment
-                  AND ($include_tests OR NOT file.path STARTS WITH 'src/test/')
-                RETURN count(DISTINCT file) AS count
-                """,
+                Q.CODE_LOOKUP_FILE_COUNT,
                 {
                     "project": project_name,
                     "fragment": path_fragment,
@@ -1846,92 +1642,8 @@ class MemgraphIngesterTools(CodeContextMixin):
             "depth": depth_value,
             "include_tests": include_tests,
         }
-        target_rows = self.client.run(
-            """
-            MATCH (target:Method {project: $project})
-            WHERE target.signature CONTAINS $fragment
-            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(target)
-            WITH target, collect(DISTINCT file.path) AS files
-            WHERE $include_tests
-               OR files = []
-               OR any(path IN files WHERE NOT path STARTS WITH 'src/test/')
-            RETURN target.signature AS signature,
-                   target.ownerDisplayName AS owner,
-                   target.ownerFqn AS ownerFqn,
-                   target.name AS name,
-                   target.startLine AS startLine,
-                   target.endLine AS endLine,
-                   files
-            ORDER BY signature
-            LIMIT $limit
-            """,
-            params,
-        )
-        impact_rows = self.client.run(
-            """
-            MATCH (caller:Method {project: $project})-[:CALLS]->(target:Method {project: $project})
-            WHERE target.signature CONTAINS $fragment
-            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
-            OPTIONAL MATCH (targetFile:File {project: $project})-[:DEFINES]->(target)
-            WITH caller, target, callerFile, targetFile
-            WHERE $include_tests
-               OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
-               AND (targetFile.path IS NULL OR NOT targetFile.path STARTS WITH 'src/test/'))
-            RETURN DISTINCT 1 AS depth,
-                   caller.signature AS callerSignature,
-                   caller.ownerDisplayName AS callerOwner,
-                   caller.ownerFqn AS callerOwnerFqn,
-                   caller.name AS callerName,
-                   caller.startLine AS callerStartLine,
-                   caller.endLine AS callerEndLine,
-                   callerFile.path AS callerPath,
-                   null AS viaSignature,
-                   null AS viaOwner,
-                   null AS viaOwnerFqn,
-                   null AS viaName,
-                   null AS viaPath,
-                   target.signature AS targetSignature,
-                   target.ownerDisplayName AS targetOwner,
-                   target.ownerFqn AS targetOwnerFqn,
-                   target.name AS targetName,
-                   targetFile.path AS targetPath
-            UNION ALL
-            MATCH (caller:Method {project: $project})
-              -[:CALLS]->(via:Method {project: $project})
-              -[:CALLS]->(target:Method {project: $project})
-            WHERE $depth >= 2 AND target.signature CONTAINS $fragment
-            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
-            OPTIONAL MATCH (viaFile:File {project: $project})-[:DEFINES]->(via)
-            OPTIONAL MATCH (targetFile:File {project: $project})-[:DEFINES]->(target)
-            WITH caller, via, target, callerFile, viaFile, targetFile
-            WHERE $include_tests
-               OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
-               AND (viaFile.path IS NULL OR NOT viaFile.path STARTS WITH 'src/test/')
-               AND (targetFile.path IS NULL OR NOT targetFile.path STARTS WITH 'src/test/'))
-            RETURN DISTINCT 2 AS depth,
-                   caller.signature AS callerSignature,
-                   caller.ownerDisplayName AS callerOwner,
-                   caller.ownerFqn AS callerOwnerFqn,
-                   caller.name AS callerName,
-                   caller.startLine AS callerStartLine,
-                   caller.endLine AS callerEndLine,
-                   callerFile.path AS callerPath,
-                   via.signature AS viaSignature,
-                   via.ownerDisplayName AS viaOwner,
-                   via.ownerFqn AS viaOwnerFqn,
-                   via.name AS viaName,
-                   viaFile.path AS viaPath,
-                   target.signature AS targetSignature,
-                   target.ownerDisplayName AS targetOwner,
-                   target.ownerFqn AS targetOwnerFqn,
-                   target.name AS targetName,
-                   targetFile.path AS targetPath
-            ORDER BY depth, callerSignature, viaSignature, targetSignature
-            SKIP $skip
-            LIMIT $impact_limit
-            """,
-            params,
-        )
+        target_rows = self.client.run(Q.CODE_IMPACT_TARGETS, params)
+        impact_rows = self.client.run(Q.CODE_IMPACT_CALLERS, params)
         impact_rows, result_meta_extra = _trim_overfetch(
             impact_rows,
             skip=skip_value,
@@ -2030,51 +1742,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             return []
         target_terms = [term for name in target_names for term in (f"{name}(", f"{name} (")]
         return self.client.run(
-            """
-            MATCH (caller:Method {project: $project})
-              -[:HAS_RAG_CHUNK]->(chunk:CodeChunk {project: $project})
-            WHERE any(term IN $target_terms WHERE chunk.text CONTAINS term)
-            MATCH (target:Method {project: $project})
-            WHERE target.signature IN $target_signatures
-              AND (chunk.text CONTAINS (target.name + '(')
-                OR chunk.text CONTAINS (target.name + ' ('))
-              AND caller <> target
-            OPTIONAL MATCH (caller)-[edge:CALLS]->(target)
-            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
-            OPTIONAL MATCH (targetFile:File {project: $project})-[:DEFINES]->(target)
-            WITH caller, target, chunk, callerFile, targetFile, count(edge) AS existingEdges
-            WHERE existingEdges = 0
-              AND (
-                $include_tests
-                OR (
-                  (callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
-                  AND (targetFile.path IS NULL OR NOT targetFile.path STARTS WITH 'src/test/')
-                )
-              )
-            RETURN DISTINCT 1 AS depth,
-                   caller.signature AS callerSignature,
-                   caller.ownerDisplayName AS callerOwner,
-                   caller.ownerFqn AS callerOwnerFqn,
-                   caller.name AS callerName,
-                   caller.startLine AS callerStartLine,
-                   caller.endLine AS callerEndLine,
-                   callerFile.path AS callerPath,
-                   null AS viaSignature,
-                   null AS viaOwner,
-                   null AS viaOwnerFqn,
-                   null AS viaName,
-                   null AS viaPath,
-                   target.signature AS targetSignature,
-                   target.ownerDisplayName AS targetOwner,
-                   target.ownerFqn AS targetOwnerFqn,
-                   target.name AS targetName,
-                   targetFile.path AS targetPath,
-                   true AS inferred,
-                   'textReference' AS evidence
-            ORDER BY callerPath, callerStartLine, callerSignature, targetSignature
-            SKIP $skip
-            LIMIT $fallback_limit
-            """,
+            Q.CODE_IMPACT_TEXT_REFERENCE,
             {
                 **params,
                 "target_signatures": target_signatures,
@@ -2184,28 +1852,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         skip_value = _bounded_skip(skip)
         limit_value = _bounded_limit(limit, default=CALL_GRAPH_LIMIT, maximum=100)
         rows = self.client.run(
-            """
-            MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
-            WHERE callee.signature CONTAINS $fragment
-            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
-            OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
-            WITH caller, callee, callerFile, calleeFile
-            WHERE $include_tests
-               OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
-               AND (calleeFile.path IS NULL OR NOT calleeFile.path STARTS WITH 'src/test/'))
-            RETURN caller.signature AS callerSignature,
-                   caller.name AS callerName,
-                   caller.ownerDisplayName AS callerOwner,
-                   caller.startLine AS callerStartLine,
-                   caller.endLine AS callerEndLine,
-                   callee.signature AS calleeSignature,
-                   callee.name AS calleeName,
-                   callee.ownerDisplayName AS calleeOwner,
-                   callerFile.path AS callerPath
-            ORDER BY caller.signature, callee.signature
-            SKIP $skip
-            LIMIT $limit
-            """,
+            Q.CODE_CALLERS,
             {
                 "project": project_name,
                 "fragment": callee_fragment,
@@ -2223,18 +1870,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         total_count = None
         if include_count:
             count_rows = self.client.run(
-                """
-                MATCH (caller:Method {project: $project})
-                  -[:CALLS]->(callee:Method {project: $project})
-                WHERE callee.signature CONTAINS $fragment
-                OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
-                OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
-                WITH caller, callee, callerFile, calleeFile
-                WHERE $include_tests
-                   OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
-                   AND (calleeFile.path IS NULL OR NOT calleeFile.path STARTS WITH 'src/test/'))
-                RETURN count(*) AS count
-                """,
+                Q.CODE_CALLERS_COUNT,
                 {
                     "project": project_name,
                     "fragment": callee_fragment,
@@ -2335,28 +1971,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         skip_value = _bounded_skip(skip)
         limit_value = _bounded_limit(limit, default=CALL_GRAPH_LIMIT, maximum=100)
         rows = self.client.run(
-            """
-            MATCH (caller:Method {project: $project})-[:CALLS]->(callee:Method {project: $project})
-            WHERE caller.signature CONTAINS $fragment
-            OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
-            OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
-            WITH caller, callee, callerFile, calleeFile
-            WHERE $include_tests
-               OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
-               AND (calleeFile.path IS NULL OR NOT calleeFile.path STARTS WITH 'src/test/'))
-            RETURN caller.signature AS callerSignature,
-                   caller.name AS callerName,
-                   caller.ownerDisplayName AS callerOwner,
-                   callee.signature AS calleeSignature,
-                   callee.name AS calleeName,
-                   callee.ownerDisplayName AS calleeOwner,
-                   callee.startLine AS calleeStartLine,
-                   callee.endLine AS calleeEndLine,
-                   calleeFile.path AS calleePath
-            ORDER BY caller.signature, callee.signature
-            SKIP $skip
-            LIMIT $limit
-            """,
+            Q.CODE_CALLEES,
             {
                 "project": project_name,
                 "fragment": caller_fragment,
@@ -2374,18 +1989,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         total_count = None
         if include_count:
             count_rows = self.client.run(
-                """
-                MATCH (caller:Method {project: $project})
-                  -[:CALLS]->(callee:Method {project: $project})
-                WHERE caller.signature CONTAINS $fragment
-                OPTIONAL MATCH (callerFile:File {project: $project})-[:DEFINES]->(caller)
-                OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
-                WITH caller, callee, callerFile, calleeFile
-                WHERE $include_tests
-                   OR ((callerFile.path IS NULL OR NOT callerFile.path STARTS WITH 'src/test/')
-                   AND (calleeFile.path IS NULL OR NOT calleeFile.path STARTS WITH 'src/test/'))
-                RETURN count(*) AS count
-                """,
+                Q.CODE_CALLEES_COUNT,
                 {
                     "project": project_name,
                     "fragment": caller_fragment,
@@ -2440,82 +2044,22 @@ class MemgraphIngesterTools(CodeContextMixin):
             "include_tests": include_tests,
         }
         largest_types = (
-            self.client.run(
-                """
-                MATCH (file:File {project: $project})-[:DEFINES]->(type {project: $project})
-                WHERE ($include_tests OR NOT file.path STARTS WITH 'src/test/')
-                  AND (type:Class OR type:Interface OR type:Annotation)
-                OPTIONAL MATCH (type)-[:DECLARES]->(method:Method {project: $project})
-                WITH file, type, count(DISTINCT method) AS methods
-                RETURN 'type' AS kind, labels(type)[0] AS owner, type.name AS name,
-                       methods AS score, file.path AS path, null AS startLine,
-                       null AS endLine, type.fqn AS sortKey
-                ORDER BY score DESC, sortKey
-                LIMIT $limit
-                """,
-                params,
-            )
+            self.client.run(Q.CODE_HOT_PATHS_LARGEST_TYPES, params)
             if "largestTypes" in requested_sections
             else []
         )
         longest_methods = (
-            self.client.run(
-                """
-                MATCH (file:File {project: $project})
-                  -[:DEFINES]->(method:Method {project: $project})
-                WHERE ($include_tests OR NOT file.path STARTS WITH 'src/test/')
-                  AND method.startLine IS NOT NULL AND method.endLine IS NOT NULL
-                  AND coalesce(method.isSynthetic, false) = false
-                WITH file, method, method.endLine - method.startLine + 1 AS lines
-                RETURN 'method' AS kind, method.ownerDisplayName AS owner, method.name AS name,
-                       lines AS score, file.path AS path,
-                       method.startLine AS startLine, method.endLine AS endLine,
-                       method.signature AS sortKey
-                ORDER BY score DESC, sortKey
-                LIMIT $limit
-                """,
-                params,
-            )
+            self.client.run(Q.CODE_HOT_PATHS_LONGEST_METHODS, params)
             if "longestMethods" in requested_sections
             else []
         )
         fan_in = (
-            self.client.run(
-                """
-                MATCH (caller:Method {project: $project})
-                  -[call:CALLS]->(method:Method {project: $project})
-                OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
-                WITH method, file, count(call) AS callers
-                WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-                RETURN 'fanIn' AS kind, method.ownerDisplayName AS owner, method.name AS name,
-                       callers AS score, file.path AS path,
-                       method.startLine AS startLine, method.endLine AS endLine,
-                       method.signature AS sortKey
-                ORDER BY score DESC, sortKey
-                LIMIT $limit
-                """,
-                params,
-            )
+            self.client.run(Q.CODE_HOT_PATHS_FAN_IN, params)
             if "fanIn" in requested_sections
             else []
         )
         fan_out = (
-            self.client.run(
-                """
-                MATCH (method:Method {project: $project})
-                  -[call:CALLS]->(:Method {project: $project})
-                OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(method)
-                WITH method, file, count(call) AS callees
-                WHERE $include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/'
-                RETURN 'fanOut' AS kind, method.ownerDisplayName AS owner, method.name AS name,
-                       callees AS score, file.path AS path,
-                       method.startLine AS startLine, method.endLine AS endLine,
-                       method.signature AS sortKey
-                ORDER BY score DESC, sortKey
-                LIMIT $limit
-                """,
-                params,
-            )
+            self.client.run(Q.CODE_HOT_PATHS_FAN_OUT, params)
             if "fanOut" in requested_sections
             else []
         )
@@ -2561,48 +2105,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         owner_filter = (owner_fragment or "").strip().lower()
         path_filter = (path_contains or "").strip()
         rows = self.client.run(
-            """
-            MATCH (caller:Method {project: $project})
-              -[call:CALLS]->(sink:Method {project: $project})
-            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(caller)
-            WITH caller, sink, file, call,
-                 toLower(coalesce(sink.name, '')) AS sinkNameText,
-                 toLower(coalesce(sink.ownerDisplayName, '') + ' '
-                         + coalesce(sink.ownerFqn, '') + ' '
-                         + coalesce(sink.signature, '')) AS sinkFullText,
-                 toLower(coalesce(caller.ownerDisplayName, '') + ' '
-                         + coalesce(caller.ownerFqn, '') + ' '
-                         + coalesce(caller.signature, '')) AS callerText
-            WHERE ($include_tests OR file.path IS NULL OR NOT file.path STARTS WITH 'src/test/')
-              AND any(fragment IN $fragments
-                      WHERE sinkNameText CONTAINS fragment
-                         OR ($custom_fragments AND sinkFullText CONTAINS fragment))
-              AND ($owner_fragment = '' OR callerText CONTAINS $owner_fragment)
-              AND ($path_contains = '' OR file.path CONTAINS $path_contains)
-            WITH caller, file,
-                 count(call) AS sinkCallEdges,
-                 count(DISTINCT sink) AS distinctSinks,
-                 collect(DISTINCT coalesce(sink.ownerDisplayName, sink.ownerFqn, '')
-                                  + '.' + coalesce(sink.name, ''))[..6] AS sinks,
-                 CASE
-                   WHEN caller.startLine IS NOT NULL AND caller.endLine IS NOT NULL
-                   THEN caller.endLine - caller.startLine + 1
-                   ELSE 0
-                 END AS lines
-            RETURN caller.ownerDisplayName AS owner,
-                   caller.name AS name,
-                   caller.signature AS signature,
-                   file.path AS path,
-                   caller.startLine AS startLine,
-                   caller.endLine AS endLine,
-                   lines,
-                   sinkCallEdges,
-                   distinctSinks,
-                   sinks,
-                   (sinkCallEdges * 1000 + lines) AS score
-            ORDER BY score DESC, signature
-            LIMIT $limit
-            """,
+            Q.CODE_OPERATION_HOT_PATHS,
             {
                 "project": project_name,
                 "fragments": fragments,
@@ -2661,18 +2164,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         path_filter = (path_contains or "").strip()
         candidate_limit = min(max(bounded_limit * 20, 100), 500)
         candidates = self.client.run(
-            """
-            MATCH (chunk:CodeChunk {project: $project})
-            WHERE chunk.sourceLabel = 'File'
-              AND coalesce(chunk.ragRole, 'file') = 'file'
-              AND ($include_tests OR chunk.path IS NULL OR NOT chunk.path STARTS WITH 'src/test/')
-              AND ($path_contains = '' OR chunk.path CONTAINS $path_contains)
-            RETURN chunk.path AS path,
-                   chunk.language AS language,
-                   chunk.text AS text
-            ORDER BY chunk.path
-            LIMIT $limit
-            """,
+            Q.CODE_RESOURCE_RISK_SCAN,
             {
                 "project": project_name,
                 "path_contains": path_filter,
@@ -2727,86 +2219,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             "limit": bounded_limit,
             "include_tests": include_tests,
         }
-        rows = self.client.run(
-            """
-            CALL {
-              MATCH (n {project: $project})
-              WITH labels(n) AS labels, count(n) AS count
-              ORDER BY count DESC
-              RETURN collect({labels: labels, count: count}) AS inventory
-            }
-            CALL {
-              MATCH (file:File {project: $project})
-                -[:DEFINES]->(method:Method {project: $project})
-              WHERE ($include_tests OR NOT file.path STARTS WITH 'src/test/')
-                AND method.startLine IS NOT NULL AND method.endLine IS NOT NULL
-                AND coalesce(method.isSynthetic, false) = false
-              WITH method.endLine - method.startLine + 1 AS lines
-              RETURN {
-                methods: count(lines),
-                avgLines: round(avg(lines) * 100) / 100,
-                maxLines: max(lines),
-                methods50Plus: sum(CASE WHEN lines >= 50 THEN 1 ELSE 0 END),
-                methods100Plus: sum(CASE WHEN lines >= 100 THEN 1 ELSE 0 END)
-              } AS methodLengths
-            }
-            CALL {
-              MATCH (method:Method {project: $project})
-              OPTIONAL MATCH (method)-[call:CALLS]->(:Method {project: $project})
-              WITH method, count(call) AS degree
-              RETURN {
-                methods: count(method),
-                avgOut: round(avg(degree) * 100) / 100,
-                maxOut: max(degree),
-                methodsOut10Plus: sum(CASE WHEN degree >= 10 THEN 1 ELSE 0 END),
-                methodsOut0: sum(CASE WHEN degree = 0 THEN 1 ELSE 0 END)
-              } AS fanOut
-            }
-            CALL {
-              MATCH (method:Method {project: $project})
-              OPTIONAL MATCH (:Method {project: $project})-[call:CALLS]->(method)
-              WITH method, count(call) AS degree
-              RETURN {
-                methods: count(method),
-                avgIn: round(avg(degree) * 100) / 100,
-                maxIn: max(degree),
-                methodsIn10Plus: sum(CASE WHEN degree >= 10 THEN 1 ELSE 0 END),
-                methodsIn0: sum(CASE WHEN degree = 0 THEN 1 ELSE 0 END)
-              } AS fanIn
-            }
-            CALL {
-              MATCH (type {project: $project})
-              WHERE type:Class OR type:Interface OR type:Annotation
-              OPTIONAL MATCH (type)-[:DECLARES]->(method:Method {project: $project})
-              WITH type, count(method) AS methods
-              RETURN {
-                types: count(type),
-                avgMethodsPerType: round(avg(methods) * 100) / 100,
-                maxMethodsPerType: max(methods),
-                types25MethodsPlus: sum(CASE WHEN methods >= 25 THEN 1 ELSE 0 END),
-                types50MethodsPlus: sum(CASE WHEN methods >= 50 THEN 1 ELSE 0 END)
-              } AS typeSizes
-            }
-            CALL {
-              MATCH (chunk:CodeChunk {project: $project})
-              WITH chunk.sourceLabel AS sourceLabel, count(chunk) AS chunks
-              ORDER BY chunks DESC, sourceLabel
-              RETURN collect({sourceLabel: sourceLabel, chunks: chunks}) AS chunksByLabel
-            }
-            CALL {
-              MATCH (file:File {project: $project})
-                -[:DEFINES]->(method:Method {project: $project})
-              WHERE $include_tests OR NOT file.path STARTS WITH 'src/test/'
-              WITH file.path AS path, count(method) AS methods
-              ORDER BY methods DESC, path
-              LIMIT $limit
-              RETURN collect({path: path, methods: methods}) AS filesByMethods
-            }
-            RETURN inventory, methodLengths, fanOut, fanIn, typeSizes,
-                   chunksByLabel, filesByMethods
-            """,
-            params,
-        )
+        rows = self.client.run(Q.CODE_QUALITY_STATS, params)
         stats = rows[0] if rows else {}
         response = {
             "project": project_name,
@@ -2829,35 +2242,15 @@ class MemgraphIngesterTools(CodeContextMixin):
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         class_hierarchy = self.client.run(
-            """
-            MATCH (c:Class {fqn: $fqn, project: $project})
-            OPTIONAL MATCH (c)-[:EXTENDS]->(parent:Class {project: $project})
-            OPTIONAL MATCH (c)-[:IMPLEMENTS]->(iface:Interface {project: $project})
-            OPTIONAL MATCH (child:Class {project: $project})-[:EXTENDS]->(c)
-            WITH c.fqn AS classFqn, collect(DISTINCT parent.fqn) AS parents,
-                 collect(DISTINCT iface.fqn) AS interfaces, collect(DISTINCT child.fqn) AS children
-            RETURN classFqn, parents, interfaces, children
-            """,
+            Q.CODE_HIERARCHY_CLASS,
             {"project": project_name, "fqn": fqn},
         )
         ancestors = self.client.run(
-            """
-            MATCH path =
-              (c:Class {fqn: $fqn, project: $project})
-              -[:EXTENDS*]->(a:Class {project: $project})
-            RETURN [node IN nodes(path) | node.fqn] AS ancestors
-            ORDER BY size(ancestors)
-            """,
+            Q.CODE_HIERARCHY_ANCESTORS,
             {"project": project_name, "fqn": fqn},
         )
         implementors = self.client.run(
-            """
-            MATCH (impl:Class {project: $project})-[:EXTENDS*0..]->(:Class {project: $project})
-                  -[:IMPLEMENTS]->(:Interface {project: $project})
-                  -[:EXTENDS*0..]->(i:Interface {fqn: $fqn, project: $project})
-            RETURN DISTINCT impl.fqn AS implementor
-            ORDER BY implementor
-            """,
+            Q.CODE_HIERARCHY_IMPLEMENTORS,
             {"project": project_name, "fqn": fqn},
         )
         return self._finalize_response(
@@ -2889,38 +2282,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             test_fragment,
         )
         rows = self.client.run(
-            """
-            MATCH (test:Method {project: $project})
-            OPTIONAL MATCH (file:File {project: $project})-[:DEFINES]->(test)
-            WITH test, file,
-                 toLower(coalesce(test.signature, '') + ' ' + coalesce(test.name, '') + ' '
-                         + coalesce(file.path, '')) AS haystack
-            WITH test, file, haystack,
-                 size([term IN $terms WHERE haystack CONTAINS term]) AS termMatches
-            WHERE (file.path STARTS WITH 'src/test/'
-                OR file.path STARTS WITH 'test/'
-                OR file.path STARTS WITH 'tests/'
-                OR file.path CONTAINS '/test/'
-                OR file.path CONTAINS '/tests/')
-              AND (test.signature CONTAINS $fragment
-                OR test.name CONTAINS $fragment
-                OR file.path CONTAINS $fragment
-                OR ($owner_fragment <> ''
-                    AND (test.ownerDisplayName CONTAINS $owner_fragment
-                      OR test.signature CONTAINS $owner_fragment
-                      OR file.path CONTAINS $owner_fragment))
-                OR termMatches >= $min_term_matches)
-            RETURN test.ownerDisplayName AS owner,
-                   test.name AS name,
-                   file.path AS path,
-                   test.startLine AS startLine,
-                   test.endLine AS endLine,
-                   CASE WHEN test.signature CONTAINS $fragment OR test.name = $fragment
-                        THEN true ELSE false END AS exactish,
-                   termMatches
-            ORDER BY exactish DESC, termMatches DESC, path, startLine, name
-            LIMIT $limit
-            """,
+            Q.CODE_TEST_METHODS,
             {
                 "project": project_name,
                 "fragment": test_fragment,
@@ -2931,21 +2293,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             },
         )
         file_rows = self.client.run(
-            """
-            MATCH (file:File {project: $project})
-            WITH file, toLower(file.path) AS haystack
-            WHERE (file.path STARTS WITH 'src/test/'
-                OR file.path STARTS WITH 'test/'
-                OR file.path STARTS WITH 'tests/'
-                OR file.path CONTAINS '/test/'
-                OR file.path CONTAINS '/tests/')
-              AND (file.path CONTAINS $fragment
-                OR ($owner_fragment <> '' AND file.path CONTAINS $owner_fragment)
-                OR size([term IN $terms WHERE haystack CONTAINS term]) >= $min_term_matches)
-            RETURN file.path AS path, file.language AS language
-            ORDER BY file.path
-            LIMIT $limit
-            """,
+            Q.CODE_TEST_FILES,
             {
                 "project": project_name,
                 "fragment": test_fragment,
@@ -2961,33 +2309,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         production_rows = []
         if exact_matches > 0:
             production_rows = self.client.run(
-                """
-                MATCH (test:Method {project: $project})
-                  -[:CALLS]->(callee:Method {project: $project})
-                OPTIONAL MATCH (testFile:File {project: $project})-[:DEFINES]->(test)
-                OPTIONAL MATCH (calleeFile:File {project: $project})-[:DEFINES]->(callee)
-                WITH test, callee, testFile, calleeFile
-                WHERE (testFile.path STARTS WITH 'src/test/'
-                    OR testFile.path STARTS WITH 'test/'
-                    OR testFile.path STARTS WITH 'tests/'
-                    OR testFile.path CONTAINS '/test/'
-                    OR testFile.path CONTAINS '/tests/')
-                  AND NOT (calleeFile.path STARTS WITH 'src/test/'
-                    OR calleeFile.path STARTS WITH 'test/'
-                    OR calleeFile.path STARTS WITH 'tests/'
-                    OR calleeFile.path CONTAINS '/test/'
-                    OR calleeFile.path CONTAINS '/tests/')
-                  AND (test.signature CONTAINS $fragment OR test.name = $fragment)
-                RETURN DISTINCT callee.ownerDisplayName AS owner,
-                       callee.name AS name,
-                       calleeFile.path AS path,
-                       callee.startLine AS startLine,
-                       callee.endLine AS endLine,
-                       test.ownerDisplayName AS testOwner,
-                       test.name AS testName
-                ORDER BY path, startLine, name
-                LIMIT $limit
-                """,
+                Q.CODE_TEST_PRODUCTION_CALLEES,
                 {
                     "project": project_name,
                     "fragment": test_fragment,
@@ -3061,47 +2383,29 @@ class MemgraphIngesterTools(CodeContextMixin):
             {
                 "project": project_name,
                 "rules": self.client.run(
-                    """
-                MATCH (m:Memory {project: $project})-[:HAS_RULE]->(rule:Rule)
-                RETURN __RETURN_PROJECTION__
-                ORDER BY rule.severity, rule.id
-                """.replace("__RETURN_PROJECTION__", rule_projection),
+                    Q.MEMORY_ORIENTATION_RULES.replace("__RETURN_PROJECTION__", rule_projection),
                     {"project": project_name},
                 ),
                 "openFindings": self.client.run(
-                    """
-                MATCH (m:Memory {project: $project})-[:HAS_FINDING]->(finding:Finding)
-                WHERE finding.status = 'open'
-                RETURN __RETURN_PROJECTION__
-                ORDER BY finding.id
-                """.replace("__RETURN_PROJECTION__", finding_projection),
+                    Q.MEMORY_ORIENTATION_OPEN_FINDINGS.replace(
+                        "__RETURN_PROJECTION__", finding_projection
+                    ),
                     {"project": project_name},
                 ),
                 "activeTasks": self.client.run(
-                    """
-                MATCH (m:Memory {project: $project})-[:HAS_TASK]->(task:Task)
-                WHERE task.status IN ['todo', 'doing', 'blocked']
-                RETURN __RETURN_PROJECTION__
-                ORDER BY task.priority, task.status, task.id
-                """.replace("__RETURN_PROJECTION__", task_projection),
+                    Q.MEMORY_ORIENTATION_ACTIVE_TASKS.replace(
+                        "__RETURN_PROJECTION__", task_projection
+                    ),
                     {"project": project_name},
                 ),
                 "openQuestions": self.client.run(
-                    """
-                MATCH (m:Memory {project: $project})-[:HAS_QUESTION]->(question:Question)
-                WHERE question.status = 'open'
-                RETURN question.id AS id, question.title AS title
-                ORDER BY question.id
-                """,
+                    Q.MEMORY_ORIENTATION_OPEN_QUESTIONS,
                     {"project": project_name},
                 ),
                 "openRisks": self.client.run(
-                    """
-                MATCH (m:Memory {project: $project})-[:HAS_RISK]->(risk:Risk)
-                WHERE risk.status = 'open'
-                RETURN __RETURN_PROJECTION__
-                ORDER BY risk.severity, risk.id
-                """.replace("__RETURN_PROJECTION__", risk_projection),
+                    Q.MEMORY_ORIENTATION_OPEN_RISKS.replace(
+                        "__RETURN_PROJECTION__", risk_projection
+                    ),
                     {"project": project_name},
                 ),
             }
@@ -3127,19 +2431,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             project_name,
         )
         rows = self.client.run(
-            """
-            CALL embeddings.text([$query], $embed_config) YIELD embeddings
-            WITH embeddings[0] AS queryVector
-            CALL vector_search.search($index, $limit, queryVector)
-            YIELD node AS chunk, similarity
-            WITH chunk, similarity
-            WHERE chunk.project = $project
-            MATCH (memory {project: $project})-[:HAS_RAG_CHUNK]->(chunk)
-            RETURN labels(memory) AS type, memory.id AS id, memory.title AS title,
-                   memory.status AS status, chunk.sourceLabel AS sourceLabel,
-                   chunk.sourceId AS sourceId, similarity
-            ORDER BY similarity DESC
-            """,
+            Q.MEMORY_SEARCH,
             {
                 "index": index_name,
                 "project": project_name,
@@ -3159,20 +2451,7 @@ class MemgraphIngesterTools(CodeContextMixin):
     ) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         rows = self.client.run(
-            f"""
-            MATCH (memory {{project: $project, id: $memory_id}})
-            WHERE {_memory_label_predicate("memory")}
-            OPTIONAL MATCH (memory)-[:REFERS_TO]->(ref:CodeRef)-[:RESOLVES_TO]->(target)
-            WITH memory, collect(
-                CASE WHEN ref IS NULL THEN NULL ELSE {{
-                    targetType: ref.targetType,
-                    key: ref.key,
-                    targetLabels: labels(target)
-                }} END
-            ) AS refs
-            RETURN labels(memory) AS labels, properties(memory) AS properties,
-                   [ref IN refs WHERE ref IS NOT NULL] AS codeRefs
-            """,
+            Q.MEMORY_GET.replace("__MEMORY_LABEL_PREDICATE__", _memory_label_predicate("memory")),
             {"project": project_name, "memory_id": memory_id},
         )
         response = {"project": project_name, "memory": rows[0] if rows else None}
@@ -3181,18 +2460,9 @@ class MemgraphIngesterTools(CodeContextMixin):
     def delete_memory(self, memory_id: str, project: str | None = None) -> dict[str, Any]:
         project_name = self.resolve_project(project)
         rows = self.client.run(
-            f"""
-            MATCH (memory {{project: $project, id: $memory_id}})
-            WHERE {_memory_label_predicate("memory")}
-            OPTIONAL MATCH (memory)-[:HAS_RAG_CHUNK]->(chunk:MemoryChunk {{project: $project}})
-            OPTIONAL MATCH (memory)-[:REFERS_TO]->(ref:CodeRef {{project: $project}})
-            RETURN labels(memory) AS labels, properties(memory) AS properties,
-                   [id IN collect(DISTINCT chunk.id) WHERE id IS NOT NULL] AS chunkIds,
-                   [codeRef IN collect(DISTINCT CASE WHEN ref IS NULL THEN NULL ELSE {{
-                       targetType: ref.targetType,
-                       key: ref.key
-                   }} END) WHERE codeRef IS NOT NULL] AS codeRefs
-            """,
+            Q.MEMORY_DELETE_READ.replace(
+                "__MEMORY_LABEL_PREDICATE__", _memory_label_predicate("memory")
+            ),
             {"project": project_name, "memory_id": memory_id},
         )
         if not rows:
@@ -3209,15 +2479,9 @@ class MemgraphIngesterTools(CodeContextMixin):
         memory = rows[0]
         code_refs = memory.get("codeRefs", [])
         self.client.run(
-            f"""
-            MATCH (memory {{project: $project, id: $memory_id}})
-            WHERE {_memory_label_predicate("memory")}
-            OPTIONAL MATCH (memory)-[:HAS_RAG_CHUNK]->(chunk:MemoryChunk {{project: $project}})
-            WITH memory, [chunk IN collect(DISTINCT chunk) WHERE chunk IS NOT NULL] AS chunks
-            FOREACH (chunk IN chunks | DETACH DELETE chunk)
-            DETACH DELETE memory
-            RETURN true AS deleted
-            """,
+            Q.MEMORY_DELETE_WRITE.replace(
+                "__MEMORY_LABEL_PREDICATE__", _memory_label_predicate("memory")
+            ),
             {"project": project_name, "memory_id": memory_id},
             write=True,
         )
@@ -3225,15 +2489,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         orphan_deleted = 0
         if code_refs:
             orphan_rows = self.client.run(
-                """
-                MATCH (ref:CodeRef {project: $project})
-                WHERE any(codeRef IN $code_refs
-                          WHERE codeRef.targetType = ref.targetType AND codeRef.key = ref.key)
-                  AND NOT (()-[:REFERS_TO]->(ref))
-                WITH collect(ref) AS refs
-                FOREACH (ref IN refs | DETACH DELETE ref)
-                RETURN size(refs) AS deleted
-                """,
+                Q.MEMORY_DELETE_ORPHAN_REFS,
                 {"project": project_name, "code_refs": code_refs},
                 write=True,
             )
@@ -3267,15 +2523,9 @@ class MemgraphIngesterTools(CodeContextMixin):
         spec = _memory_spec(memory_type)
         properties = self._validated_memory_fields(memory_type, fields)
         rows = self.client.run(
-            f"""
-            MERGE (root:Memory {{project: $project}})
-            MERGE (node:{spec.label} {{id: $memory_id, project: $project}})
-            SET node += $properties,
-                node.createdAt = coalesce(node.createdAt, datetime()),
-                node.updatedAt = datetime()
-            MERGE (root)-[:{spec.relation}]->(node)
-            RETURN labels(node) AS labels, properties(node) AS properties
-            """,
+            Q.MEMORY_UPSERT.replace("__LABEL__", spec.label).replace(
+                "__RELATION__", spec.relation
+            ),
             {"project": project_name, "memory_id": memory_id, "properties": properties},
             write=True,
         )
@@ -3321,11 +2571,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             raise MemgraphError(f"{memory_type} does not have a status field.")
         self._validate_controlled_value(memory_type, "status", status)
         rows = self.client.run(
-            f"""
-            MATCH (node:{spec.label} {{id: $memory_id, project: $project}})
-            SET node.status = $status, node.updatedAt = datetime()
-            RETURN labels(node) AS labels, properties(node) AS properties
-            """,
+            Q.MEMORY_UPDATE_STATUS.replace("__LABEL__", spec.label),
             {"project": project_name, "memory_id": memory_id, "status": status},
             write=True,
         )
@@ -3360,16 +2606,9 @@ class MemgraphIngesterTools(CodeContextMixin):
         spec = _memory_spec(memory_type)
         target_label, predicate = _target_match(target_type)
         rows = self.client.run(
-            f"""
-            MATCH (node:{spec.label} {{id: $memory_id, project: $project}})
-            MATCH (target:{target_label} {{project: $project}})
-            WHERE {predicate}
-            MERGE (ref:CodeRef {{project: $project, targetType: $target_type, key: $target_key}})
-            MERGE (node)-[:REFERS_TO]->(ref)
-            MERGE (ref)-[:RESOLVES_TO]->(target)
-            RETURN node.id AS memoryId, ref.targetType AS targetType, ref.key AS key,
-                   labels(target) AS targetLabels
-            """,
+            Q.MEMORY_LINK_CODE_REF.replace("__LABEL__", spec.label)
+            .replace("__TARGET_LABEL__", target_label)
+            .replace("__TARGET_PREDICATE__", predicate),
             {
                 "project": project_name,
                 "memory_id": memory_id,
@@ -3414,20 +2653,7 @@ class MemgraphIngesterTools(CodeContextMixin):
         text_hash = sha256(text.encode("utf-8")).hexdigest()
         chunk_id = f"MCH-{memory_id}"
         rows = self.client.run(
-            f"""
-            MATCH (node:{spec.label} {{id: $memory_id, project: $project}})
-            MERGE (chunk:MemoryChunk {{id: $chunk_id, project: $project}})
-            SET chunk.sourceLabel = $memory_type,
-                chunk.sourceId = node.id,
-                chunk.text = $text,
-                chunk.textHash = $text_hash,
-                chunk.createdAt = coalesce(chunk.createdAt, datetime()),
-                chunk.updatedAt = datetime(),
-                chunk.embeddingDirty = true
-            REMOVE chunk.embedding, chunk.embeddingModel, chunk.embeddingDimensions
-            MERGE (node)-[:HAS_RAG_CHUNK]->(chunk)
-            RETURN chunk.id AS id, chunk.textHash AS textHash, chunk.embeddingDirty AS dirty
-            """,
+            Q.MEMORY_REFRESH_CHUNK.replace("__LABEL__", spec.label),
             {
                 "project": project_name,
                 "memory_id": memory_id,
@@ -3466,19 +2692,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             return self._finalize_response(response) if finalize else response
 
         pending = self.client.run(
-            """
-            MATCH (chunk:MemoryChunk {project: $project})
-            WHERE chunk.id IN $ids
-              AND chunk.text IS NOT NULL
-              AND (chunk.embedding IS NULL
-                OR chunk.embeddingModel IS NULL
-                OR chunk.embeddingModel <> $model_name
-                OR chunk.embeddingDimensions IS NULL
-                OR chunk.embeddingDimensions <> $dimension
-                OR coalesce(chunk.embeddingDirty, false) = true)
-            RETURN chunk.id AS id
-            ORDER BY chunk.id
-            """,
+            Q.MEMORY_REFRESH_EMBEDDINGS_PENDING,
             {
                 "project": project_name,
                 "ids": ids,
@@ -3492,17 +2706,7 @@ class MemgraphIngesterTools(CodeContextMixin):
             return self._finalize_response(response) if finalize else response
 
         result = self.client.run(
-            """
-            MATCH (chunk:MemoryChunk {project: $project})
-            WHERE chunk.id IN $ids
-            WITH chunk
-            ORDER BY chunk.id
-            WITH collect(chunk) AS chunks
-            WITH chunks, [chunk IN chunks | chunk.id] AS embeddedIds
-            CALL embeddings.node_sentence(chunks, $embed_config)
-            YIELD success, dimension
-            RETURN success AS success, dimension AS dimension, embeddedIds AS ids
-            """,
+            Q.MEMORY_REFRESH_EMBEDDINGS_EMBED,
             {
                 "project": project_name,
                 "ids": pending_ids,
@@ -3517,15 +2721,7 @@ class MemgraphIngesterTools(CodeContextMixin):
 
         dimension = result[0].get("dimension") if result else self.config.embedding_dimensions
         self.client.run(
-            """
-            MATCH (chunk:MemoryChunk {project: $project})
-            WHERE chunk.id IN $ids
-            SET chunk.embeddingModel = $model_name,
-                chunk.embeddingDimensions = $dimension,
-                chunk.embeddingDirty = false,
-                chunk.updatedAt = datetime()
-            RETURN chunk.id AS id
-            """,
+            Q.MEMORY_REFRESH_EMBEDDINGS_MARK,
             {
                 "project": project_name,
                 "ids": pending_ids,
