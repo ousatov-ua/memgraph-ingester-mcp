@@ -48,7 +48,13 @@ Code knowledge-graph tools for projects indexed by memgraph-ingester. Usage disc
 - Responses are compact JSON (table_json: cols + rows); absent keys mean null or empty,
   never an error.
 - Minimize total tool-call turns: batch independent calls in one message, and prefer one
-  full source read over repeated small ranged reads of the same file.
+  full source read over repeated small ranged reads of the same file. Each new turn
+  re-reads the full accumulated cached context — turn count × context size dominates cost
+  more than individual response sizes. For implementation tasks: (1) issue all MCP discovery
+  calls in one batched turn, (2) read all needed source files in a second batched turn,
+  (3) then edit. This two-phase discipline caps the cache multiplier.
+- Type family enumeration: use code_hierarchy over separate code_lookup_type calls per
+  class — one call returns all implementors or subclasses instead of N calls.
 """
 
 
@@ -248,8 +254,11 @@ def create_server(
         format: str = "table_json",
     ) -> dict[str, Any]:
         """Look up classes, interfaces, or annotations by simple name or FQN.
-        include_members=true is the right way to enumerate one class's members in a
-        single call (instead of paginating code_lookup_methods)."""
+        include_members=true enumerates one class's members in a single call (prefer over
+        paginating code_lookup_methods). compact=true (default) returns type metadata and
+        member identifiers — sufficient for almost all lookups. compact=false adds
+        modifiers, visibility, and annotations; use it only when those specific fields are
+        required, as it inflates response size and downstream cache cost."""
 
         return tools.code_lookup_type(
             project=project,
@@ -521,7 +530,10 @@ def create_server(
         project: str | None = None,
         format: str = "table_json",
     ) -> dict[str, Any]:
-        """Return class ancestry, children, interfaces, and interface implementors."""
+        """Return class ancestry, children, interfaces, and interface implementors.
+        For type family enumeration (all subclasses of a base or all implementors of an
+        interface), one call here is more efficient than separate code_lookup_type calls
+        per class."""
 
         return tools.code_hierarchy(fqn, project, output_format=format)
 
