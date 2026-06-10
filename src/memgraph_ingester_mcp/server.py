@@ -49,7 +49,7 @@ Code knowledge-graph tools for projects indexed by memgraph-ingester. Usage disc
   never an error.
 - Minimize total tool-call turns: batch independent calls in one message, and prefer one
   full source read over repeated small ranged reads of the same file. Each new turn
-  re-reads the full accumulated cached context — turn count × context size dominates cost
+  re-reads the full accumulated cached context — turn count x context size dominates cost
   more than individual response sizes. For implementation tasks: (1) issue all MCP discovery
   calls in one batched turn, (2) read all needed source files in a second batched turn,
   (3) then edit. This two-phase discipline caps the cache multiplier.
