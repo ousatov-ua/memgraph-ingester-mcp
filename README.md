@@ -15,6 +15,13 @@ escape hatch for unusual lookups.
 The package is intended to be published to PyPI as `memgraph-ingester-mcp` under the
 `ousatov-ua` account.
 
+All query and formatting logic lives in
+[`memgraph-ingester-tool`](https://github.com/ousatov-ua/memgraph-ingester-tool)
+(PyPI: [`memgraph-ingester-tool`](https://pypi.org/project/memgraph-ingester-tool/)) — the single
+source of truth shared by this MCP server and the `mgtools` CLI for `mgconsole` users without MCP
+access. This package is a thin FastMCP adapter over it; change query behavior there, and both
+consumers pick it up.
+
 ## Tools
 
 Code graph tools:

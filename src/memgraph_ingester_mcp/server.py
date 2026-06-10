@@ -9,15 +9,12 @@ from functools import wraps
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
-
-from memgraph_ingester_mcp.config import MemgraphConfig
-from memgraph_ingester_mcp.db import MemgraphClient
-from memgraph_ingester_mcp.services import (
+from memgraph_ingester_tool import MemgraphTools, ToolConfig
+from memgraph_ingester_tool.tools import (
     CALL_GRAPH_LIMIT,
     DISCOVERY_LIMIT,
     LOOKUP_LIMIT,
     MEMBER_LIMIT,
-    MemgraphIngesterTools,
 )
 
 
@@ -59,13 +56,13 @@ Code knowledge-graph tools for projects indexed by memgraph-ingester. Usage disc
 
 
 def create_server(
-    config: MemgraphConfig | None = None,
-    client: MemgraphClient | None = None,
+    config: ToolConfig | None = None,
+    client: Any | None = None,
 ) -> FastMCP:
     """Create a FastMCP server with high-level Memgraph Ingester tools."""
 
-    resolved_config = config or MemgraphConfig.from_environment()
-    tools = MemgraphIngesterTools(client or MemgraphClient(resolved_config), resolved_config)
+    resolved_config = config or ToolConfig.from_environment()
+    tools = MemgraphTools(resolved_config, client=client)
     mcp = FastMCP("memgraph-ingester", instructions=SERVER_INSTRUCTIONS)
 
     def compact_tool(fn: Callable[..., dict[str, Any]]) -> Callable[..., str]:
