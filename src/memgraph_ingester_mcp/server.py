@@ -25,6 +25,30 @@ def _compact_json_response(response: Any) -> str:
     return json.dumps(response, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
+SERVER_INSTRUCTIONS = """\
+Code knowledge-graph tools for projects indexed by memgraph-ingester. Usage discipline:
+- Use these tools for structure, relationships, and discovery; once target files and line
+  ranges are identified, switch to reading source. Do not interleave graph lookups into an
+  edit-compile-test loop — the exceptions are code_impact when a method signature changes,
+  code_test_context when a test fails, and code_hierarchy before declaration changes.
+- Compact defaults suffice. Paginate with meta.nextSkip only when meta.hasMore is true and
+  the extra rows are needed. Pass compact=false or include_count=true only when those
+  fields are required for the answer.
+- code_search / code_text_search hits are discovery anchors, not evidence — verify with an
+  exact lookup or source. If two probes overlap or return nothing, stop probing and switch
+  to exact lookups or source.
+- To enumerate one class's methods use code_lookup_type(include_members=true) or
+  code_file_context, not paginated code_lookup_methods.
+- Refactor blast radius: code_impact, with view="files" for a risk-ranked file list.
+  Performance audits: code_hot_paths + code_operation_hot_paths; results are pre-ranked,
+  so source-verify only the top suspects.
+- Responses are compact JSON (table_json: cols + rows); absent keys mean null or empty,
+  never an error.
+- Minimize total tool-call turns: batch independent calls in one message, and prefer one
+  full source read over repeated small ranged reads of the same file.
+"""
+
+
 def create_server(
     config: MemgraphConfig | None = None,
     client: MemgraphClient | None = None,
@@ -33,7 +57,7 @@ def create_server(
 
     resolved_config = config or MemgraphConfig.from_environment()
     tools = MemgraphIngesterTools(client or MemgraphClient(resolved_config), resolved_config)
-    mcp = FastMCP("memgraph-ingester")
+    mcp = FastMCP("memgraph-ingester", instructions=SERVER_INSTRUCTIONS)
 
     def compact_tool(fn: Callable[..., dict[str, Any]]) -> Callable[..., str]:
         signature = inspect.signature(fn)
@@ -81,7 +105,10 @@ def create_server(
         include_keys: bool = False,
         format: str = "table_json",
     ) -> dict[str, Any]:
-        """Hybrid CodeChunk search: vector + lexical signals fused by reciprocal rank."""
+        """Hybrid CodeChunk search: vector + lexical signals fused by reciprocal rank.
+        Hits are discovery anchors, not evidence — verify with an exact lookup or source.
+        If two probes overlap or return nothing, switch to exact lookups or source instead
+        of reformulating a third time."""
 
         return tools.code_search(
             query=query,
@@ -118,7 +145,10 @@ def create_server(
         path_contains: str | None = None,
         format: str = "table_json",
     ) -> dict[str, Any]:
-        """Search indexed chunk text lexically with compact source-linked rows."""
+        """Search indexed chunk text lexically with compact source-linked rows.
+        Hits are discovery anchors, not evidence — verify with an exact lookup or source.
+        If two probes overlap or return nothing, switch to exact lookups or source instead
+        of reformulating a third time."""
 
         return tools.code_text_search(
             query=query,
@@ -214,7 +244,9 @@ def create_server(
         compact: bool = True,
         format: str = "table_json",
     ) -> dict[str, Any]:
-        """Look up classes, interfaces, or annotations by simple name or FQN."""
+        """Look up classes, interfaces, or annotations by simple name or FQN.
+        include_members=true is the right way to enumerate one class's members in a
+        single call (instead of paginating code_lookup_methods)."""
 
         return tools.code_lookup_type(
             project=project,
@@ -241,7 +273,12 @@ def create_server(
         include_count: bool = False,
         format: str = "table_json",
     ) -> dict[str, Any]:
-        """Find methods by signature fragment and return exact source ranges."""
+        """Find methods by signature fragment and return exact source ranges.
+        Compact rows (owner, name, path, startLine, endLine) suffice for range reads;
+        compact=false only when full signatures/modifiers are needed. Methods whose owner
+        exactly matches a fragment term rank first. To enumerate all methods of one class,
+        prefer code_lookup_type(include_members=true) or code_file_context instead of
+        paginating here; paginate only when meta.hasMore is true and the rows are needed."""
 
         return tools.code_lookup_methods(
             signature_fragment=signature_fragment,

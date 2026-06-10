@@ -1419,6 +1419,17 @@ def test_table_json_rejects_unknown_format():
         tools.code_hot_paths(output_format="yaml")
 
 
+def test_server_declares_usage_discipline_instructions():
+    mcp = create_server(MemgraphConfig(default_project="demo"), client=FakeClient())
+
+    instructions = mcp.instructions or ""
+    assert "edit-compile-test loop" in instructions
+    assert "meta.nextSkip" in instructions
+    assert "discovery anchors" in instructions
+    assert "code_lookup_type(include_members=true)" in instructions
+    assert "batch independent calls" in instructions
+
+
 def test_registered_code_tool_defaults_are_discovery_sized():
     mcp = create_server(MemgraphConfig(default_project="demo"), client=FakeClient())
     registered = mcp._tool_manager._tools
@@ -1946,8 +1957,33 @@ def test_code_lookup_methods_orders_by_return_alias_after_collect():
 
     query = tools.client.calls[0]["query"]
     assert "collect(DISTINCT file.path) AS files" in query
-    assert "ORDER BY sortSignature" in query
+    assert "sortSignature" in query.split("ORDER BY")[1]
     assert "ORDER BY method.signature" not in query
+
+
+def test_code_lookup_methods_ranks_exact_owner_matches_first():
+    tools = make_tools()
+
+    tools.code_lookup_methods("GraphWriter upsertFile")
+
+    call = tools.client.calls[0]
+    order_clause = call["query"].split("ORDER BY")[1]
+    assert "CASE WHEN toLower(ownerDisplayName) IN $fragment_terms THEN 0 ELSE 1 END" in (
+        order_clause
+    )
+    assert call["parameters"]["fragment_terms"] == ["graphwriter", "upsertfile"]
+
+
+def test_code_lookup_methods_non_compact_keeps_owner_rank_ordering():
+    tools = make_tools()
+
+    tools.code_lookup_methods("GraphWriter", compact=False)
+
+    order_clause = tools.client.calls[0]["query"].split("ORDER BY")[1]
+    assert "CASE WHEN toLower(ownerDisplayName) IN $fragment_terms THEN 0 ELSE 1 END" in (
+        order_clause
+    )
+    assert "signature" in order_clause
 
 
 def test_code_lookup_methods_can_return_compact_ranges():

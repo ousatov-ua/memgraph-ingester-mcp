@@ -1537,6 +1537,10 @@ class MemgraphIngesterTools(CodeContextMixin):
                    method.isStatic AS isStatic, method.isSynthetic AS isSynthetic, files
             """
         )
+        # Rank methods whose owner exactly matches a fragment term first, so a query like
+        # "ChunkEmbeddingRefresher" answers "methods of this class" on page 1 instead of
+        # mixing in alphabetically earlier signatures that merely reference the class.
+        owner_rank = "CASE WHEN toLower(ownerDisplayName) IN $fragment_terms THEN 0 ELSE 1 END"
         rows = self.client.run(
             """
             MATCH (method:Method {project: $project})
@@ -1550,7 +1554,8 @@ class MemgraphIngesterTools(CodeContextMixin):
             SKIP $skip
             LIMIT $limit
             """.replace("__RETURN_PROJECTION__", return_projection.strip()).replace(
-                "__ORDER_BY__", "sortSignature" if compact else "signature"
+                "__ORDER_BY__",
+                f"{owner_rank}, " + ("sortSignature" if compact else "signature"),
             ),
             {
                 "project": project_name,
