@@ -32,8 +32,11 @@ Code knowledge-graph tools for projects indexed by memgraph-ingester. Usage disc
   edit-compile-test loop — the exceptions are code_impact when a method signature changes,
   code_test_context when a test fails, and code_hierarchy before declaration changes.
 - Compact defaults suffice. Paginate with meta.nextSkip only when meta.hasMore is true and
-  the extra rows are needed. Pass compact=false or include_count=true only when those
-  fields are required for the answer.
+  the extra rows are needed; when a response carries meta.note, follow it — it flags
+  exhausted matches and cheaper alternatives. Pass compact=false or include_count=true
+  only when those fields are required for the answer.
+- If the client defers tool schemas, load every code_* tool you plan to use in one batch
+  (one ToolSearch/select call), not one tool per call.
 - code_search / code_text_search hits are discovery anchors, not evidence — verify with an
   exact lookup or source. If two probes overlap or return nothing, stop probing and switch
   to exact lookups or source.
@@ -278,7 +281,9 @@ def create_server(
         compact=false only when full signatures/modifiers are needed. Methods whose owner
         exactly matches a fragment term rank first. To enumerate all methods of one class,
         prefer code_lookup_type(include_members=true) or code_file_context instead of
-        paginating here; paginate only when meta.hasMore is true and the rows are needed."""
+        paginating here; paginate only when meta.hasMore is true and the rows are needed.
+        Stop paginating when meta.note reports owner-exact matches are exhausted —
+        later pages only contain signatures that reference the fragment."""
 
         return tools.code_lookup_methods(
             signature_fragment=signature_fragment,

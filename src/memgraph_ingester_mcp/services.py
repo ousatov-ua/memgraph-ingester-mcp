@@ -1565,12 +1565,33 @@ class MemgraphIngesterTools(CodeContextMixin):
                 "include_tests": include_tests,
             },
         )
+        raw_rows = rows
         rows, page_extra = _trim_overfetch(
             rows,
             skip=skip_value,
             limit=limit_value,
             include_count=include_count,
         )
+        # Owner-exact rows sort first, so once a non-exact row appears no exact row follows.
+        # Tell paginating callers when the owner-exact rows are exhausted, so a query like
+        # "ChunkEmbeddingRefresher" stops at page 1 instead of walking reference matches.
+        if fragment_terms and page_extra:
+            exact_flags = [
+                (row.get("ownerDisplayName") or "").lower() in fragment_terms
+                for row in raw_rows
+            ]
+            kept_exact = sum(exact_flags[: len(rows)])
+            boundary_seen = not all(exact_flags)
+            note = None
+            if kept_exact and boundary_seen:
+                note = (
+                    "owner-exact matches end on this page; further rows only reference the "
+                    "fragment — enumerate members via code_lookup_type(include_members=true)"
+                )
+            elif not kept_exact and skip_value:
+                note = "no owner-exact matches on this page; rows only reference the fragment"
+            if note:
+                page_extra = {**page_extra, "note": note}
         if compact:
             rows = [
                 {

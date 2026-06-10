@@ -1997,6 +1997,76 @@ def test_code_lookup_methods_can_return_compact_ranges():
     assert "method.isSynthetic AS isSynthetic" not in query
 
 
+class MethodPageClient:
+    """Serves method rows honoring skip/limit so pagination behavior can be tested."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    def run(self, query, parameters=None, *, write=False):
+        params = dict(parameters or {})
+        self.calls.append({"query": query, "parameters": params, "write": write})
+        skip = params.get("skip", 0)
+        limit = params.get("limit", len(self.rows))
+        return [dict(row) for row in self.rows[skip : skip + limit]]
+
+
+def _method_row(owner, name, line):
+    return {
+        "ownerDisplayName": owner,
+        "name": name,
+        "startLine": line,
+        "endLine": line + 5,
+        "files": [f"src/main/java/demo/{owner}.java"],
+    }
+
+
+def test_code_lookup_methods_notes_owner_exact_boundary():
+    rows = [_method_row("ChunkEmbeddingRefresher", f"m{i}", i * 10) for i in range(4)]
+    rows += [_method_row("GraphWriter", f"ref{i}", 500 + i * 10) for i in range(3)]
+    tools = MemgraphIngesterTools(MethodPageClient(rows), MemgraphConfig(default_project="demo"))
+
+    result = tools.code_lookup_methods("ChunkEmbeddingRefresher", limit=5)
+
+    assert result["meta"]["hasMore"] is True
+    assert "owner-exact matches end on this page" in result["meta"]["note"]
+    assert "code_lookup_type(include_members=true)" in result["meta"]["note"]
+
+
+def test_code_lookup_methods_no_note_while_owner_exact_rows_remain():
+    rows = [_method_row("ChunkEmbeddingRefresher", f"m{i}", i * 10) for i in range(7)]
+    tools = MemgraphIngesterTools(MethodPageClient(rows), MemgraphConfig(default_project="demo"))
+
+    result = tools.code_lookup_methods("ChunkEmbeddingRefresher", limit=5)
+
+    assert result["meta"]["hasMore"] is True
+    assert "note" not in result["meta"]
+
+
+def test_code_lookup_methods_notes_reference_only_page():
+    rows = [_method_row("ChunkEmbeddingRefresher", f"m{i}", i * 10) for i in range(5)]
+    rows += [_method_row("GraphWriter", f"ref{i}", 500 + i * 10) for i in range(10)]
+    tools = MemgraphIngesterTools(MethodPageClient(rows), MemgraphConfig(default_project="demo"))
+
+    result = tools.code_lookup_methods("ChunkEmbeddingRefresher", skip=5, limit=5)
+
+    assert result["meta"]["hasMore"] is True
+    assert result["meta"]["note"] == (
+        "no owner-exact matches on this page; rows only reference the fragment"
+    )
+
+
+def test_code_lookup_methods_no_note_for_method_name_fragments():
+    rows = [_method_row("GraphWriter", f"upsertFile{i}", i * 10) for i in range(7)]
+    tools = MemgraphIngesterTools(MethodPageClient(rows), MemgraphConfig(default_project="demo"))
+
+    result = tools.code_lookup_methods("upsertFile", limit=5)
+
+    assert result["meta"]["hasMore"] is True
+    assert "note" not in result["meta"]
+
+
 def test_code_lookup_methods_can_return_table_json():
     tools = make_tools()
 
