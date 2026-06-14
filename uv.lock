@@ -310,7 +310,7 @@ wheels = [
 
 [[package]]
 name = "memgraph-ingester-mcp"
-version = "0.6.4"
+version = "0.6.5"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
@@ -326,7 +326,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "mcp", specifier = ">=1.16.0" },
-    { name = "memgraph-ingester-tool", specifier = ">=0.1.1" },
+    { name = "memgraph-ingester-tool", specifier = ">=0.1.2" },
 ]
 provides-extras = ["compression"]
 
@@ -338,14 +338,14 @@ dev = [
 
 [[package]]
 name = "memgraph-ingester-tool"
-version = "0.1.1"
+version = "0.1.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "neo4j" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0a/cb/1f8ace300af0d39f983c4fc525b3cbbc04f8a1b02449b6a019bbe606bb48/memgraph_ingester_tool-0.1.1.tar.gz", hash = "sha256:167fb617cb46914df1709b21eebc1b7bfc0b0d46f8e99041d0d8ba39e00b814c", size = 61279, upload-time = "2026-06-10T17:41:41.293Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/a6/57a1ddc6992f9a619b30149db8f3be0c4887745671586e9ca26b61e8c765/memgraph_ingester_tool-0.1.2.tar.gz", hash = "sha256:0dbf8dabd5f0c287e4c88c1fb0209d9b163e3ad4fad194c1e07f6a2376396768", size = 64146, upload-time = "2026-06-14T19:08:04.999Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ad/d9/cb0970f3cb35ca2c0e69caec625fe0d1ed4a3047f297824cfbfe0ce78262/memgraph_ingester_tool-0.1.1-py3-none-any.whl", hash = "sha256:a2881366fb5c5b513e9dcedf96f510812938a9df03cefd7bb84849580cbf11f6", size = 79234, upload-time = "2026-06-10T17:41:40.296Z" },
+    { url = "https://files.pythonhosted.org/packages/02/9f/230ff6ae213732404802f74f1c7359d30d111aee40a942c03f9117e938da/memgraph_ingester_tool-0.1.2-py3-none-any.whl", hash = "sha256:e3320c122b49a1823585509d627e40d9795da6dbc9b0301e416313bcb332c5fc", size = 81130, upload-time = "2026-06-14T19:08:04.159Z" },
 ]
 
 [[package]]

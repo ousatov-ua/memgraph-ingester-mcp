@@ -1,6 +1,6 @@
 [project]
 name = "memgraph-ingester-mcp"
-version = "0.6.4"
+version = "0.6.5"
 description = "MCP tools for Memgraph graphs created by memgraph-ingester"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,7 +20,7 @@ classifiers = [
 ]
 dependencies = [
     "mcp>=1.16.0",
-    "memgraph-ingester-tool>=0.1.1",
+    "memgraph-ingester-tool>=0.1.2",
 ]
 
 [project.optional-dependencies]
@@ -53,6 +53,13 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
+
+[tool.pyright]
+include = ["src", "tests"]
+extraPaths = ["src"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.13"
 
 [tool.pytest.ini_options]
 addopts = "-q"
